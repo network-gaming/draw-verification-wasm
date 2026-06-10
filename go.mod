@@ -1,3 +1,3 @@
 module github.com/network-gaming/draw-verification-wasm
 
-go 1.24
+go 1.19
