@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Independent Draw Verification</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b21; --panel:#12151b; --line:#2a2f3a; --fg:#e6e9ef; --muted:#9aa3b2; --pass:#3ecf8e; --fail:#ff6b6b; --accent:#6ea8fe; --in:#e3b341; --out:#6ea8fe; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 28px 18px 80px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 22px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; margin-bottom:18px; }
+  label { display:block; font-size:13px; color:var(--muted); margin-bottom:6px; }
+  input[type=text], textarea { width:100%; background:#0c0e12; color:var(--fg); border:1px solid var(--line); border-radius:7px; padding:10px 12px; font:inherit; }
+  textarea { min-height:110px; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
+  .row > div { flex:1; min-width:170px; }
+  button { background:var(--accent); color:#0b0d11; border:0; border-radius:7px; padding:10px 18px; font:600 14px/1 inherit; cursor:pointer; }
+  .tabs { display:flex; gap:8px; margin-bottom:14px; }
+  .tab { padding:6px 12px; border:1px solid var(--line); border-radius:999px; color:var(--muted); cursor:pointer; font-size:13px; }
+  .tab.active { color:var(--fg); border-color:var(--accent); }
+  .status { font-size:13px; color:var(--muted); margin:8px 0 0; }
+  details.how { background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:10px 14px; margin-bottom:16px; }
+  details.how summary { cursor:pointer; color:var(--accent); font-weight:600; }
+  details.how p { color:var(--muted); margin:10px 0 0; }
+  .result { border:1px solid var(--line); border-radius:10px; padding:0; margin-top:16px; overflow:hidden; }
+  .rhead { padding:14px 16px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  .rhead .label { font-weight:600; }
+  .rhead .kind { font-size:12px; color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:2px 8px; }
+  .verdict { font-weight:700; margin-left:auto; }
+  .verdict.ok { color:var(--pass); } .verdict.bad { color:var(--fail); }
+  .section { padding:14px 16px; border-bottom:1px solid var(--line); }
+  .section:last-child { border-bottom:0; }
+  .section h4 { margin:0 0 10px; font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }
+  .kv { display:grid; grid-template-columns:170px 1fr; gap:6px 14px; align-items:start; }
+  .kv .k { color:var(--muted); font-size:13px; }
+  .kv .v { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; word-break:break-all; }
+  .tag { font-size:10px; font-weight:700; letter-spacing:.05em; padding:1px 5px; border-radius:4px; margin-left:8px; vertical-align:middle; }
+  .tag.in { background:rgba(227,179,65,.15); color:var(--in); }
+  .tag.out { background:rgba(110,168,254,.15); color:var(--out); }
+  .formula { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; color:var(--muted); background:#0c0e12; border:1px solid var(--line); border-radius:6px; padding:8px 10px; margin:6px 0 0; word-break:break-all; }
+  .eq-ok { color:var(--pass); } .eq-bad { color:var(--fail); }
+  .check { padding:10px 0; border-top:1px solid var(--line); }
+  .check:first-of-type { border-top:0; }
+  .check .top { display:flex; gap:10px; align-items:baseline; }
+  .mark { flex:0 0 44px; font-weight:700; font-size:13px; }
+  .mark.ok { color:var(--pass); } .mark.bad { color:var(--fail); }
+  .check .name { font-weight:600; }
+  .check .why { color:var(--muted); font-size:13px; margin:3px 0 0 54px; }
+  .check .work { margin:6px 0 0 54px; }
+  .beaconrow { display:flex; gap:10px; align-items:baseline; }
+  details.raw { margin-top:8px; }
+  details.raw summary { cursor:pointer; color:var(--accent); font-size:12px; }
+  details.raw pre { background:#0c0e12; border:1px solid var(--line); border-radius:6px; padding:10px; overflow:auto; font-size:11.5px; max-height:240px; }
+  code { background:#0c0e12; padding:1px 5px; border-radius:4px; font-size:12px; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Independent Draw Verification</h1>
+  <p class="sub">
+    Every claim below is <strong>recomputed in your own browser</strong> from the published proof, using the same
+    open algorithm as the platform. The random value is fetched <strong>directly from the public
+    <a href="https://drand.love" target="_blank" rel="noopener">drand</a> network</strong>, not from this server — so
+    you do not have to trust the platform's result.
+  </p>
+
+  <details class="how">
+    <summary>How a verifiable draw works (30-second version)</summary>
+    <p><strong>Before</strong> the draw, the platform writes a tamper-evident commitment: a <em>hash</em> of its secret
+    local seed, a <em>digest</em> of the frozen pool of eligible entries, and the <em>number</em> of a future drand
+    beacon pulse — chosen before that pulse's random value exists.
+    <strong>After</strong> the pulse publishes, it reveals the local seed, the beacon value, the final seed
+    (<code>SHA-256(local seed ‖ beacon value)</code>) and the winners (a deterministic function of the pool and the
+    final seed). Because the beacon value did not exist when the platform committed, it could not have known or
+    steered the outcome — and anyone can reproduce the winners from the published values.</p>
+  </details>
+
+  <div class="card">
+    <div class="tabs">
+      <div class="tab active" data-tab="round">By round</div>
+      <div class="tab" data-tab="paste">Paste a proof bundle</div>
+    </div>
+    <div id="pane-round">
+      <div class="row">
+        <div><label>Round ID</label><input id="roundId" type="text" inputmode="numeric" placeholder="e.g. 42" /></div>
+        <div><label>API base URL</label><input id="baseUrl" type="text" placeholder="(defaults to this site)" /></div>
+        <div style="flex:0 0 auto;"><button id="verifyRound">Verify round</button></div>
+      </div>
+      <p class="status" id="statusRound">Loads <code>/v2/raffles/rounds/&lt;id&gt;/verification</code></p>
+    </div>
+    <div id="pane-paste" style="display:none;">
+      <label>Proof bundle JSON (a single bundle, or an array)</label>
+      <textarea id="bundleText" placeholder='{"kind":"MAIN_DRAW","pool":[...],"commit":{...},"reveal":{...}}'></textarea>
+      <div style="margin-top:10px;"><button id="verifyPaste">Verify bundle</button></div>
+      <p class="status" id="statusPaste"></p>
+    </div>
+  </div>
+
+  <div id="output"></div>
+</div>
+
+<script src="wasm_exec.js"></script>
+<script>
+const DRAND_DEFAULT = "https://api.drand.sh";
+
+let wasmReady = (async () => {
+  const go = new Go();
+  const buf = await fetch("drawverify.wasm").then(r => r.arrayBuffer());
+  const { instance } = await WebAssembly.instantiate(buf, go.importObject);
+  go.run(instance); // registers global drawverify()
+})();
+
+// ---- helpers ----
+function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function hexToBytes(h){ h=(h||"").trim(); const a=new Uint8Array(h.length/2); for(let i=0;i<a.length;i++)a[i]=parseInt(h.substr(i*2,2),16); return a; }
+function bytesToHex(b){ return Array.from(b).map(x=>x.toString(16).padStart(2,"0")).join(""); }
+async function sha256hex(bytes){ const d=await crypto.subtle.digest("SHA-256", bytes); return bytesToHex(new Uint8Array(d)); }
+function concat(a,b){ const o=new Uint8Array(a.length+b.length); o.set(a,0); o.set(b,a.length); return o; }
+function kvRow(k, v, tag){ return `<div class="k">${esc(k)}${tag?`<span class="tag ${tag}">${tag.toUpperCase()}</span>`:""}</div><div class="v">${esc(v||"—")}</div>`; }
+
+// Plain-English meaning of each check (keyed by the verifier's check name).
+const WHY = {
+  "local-seed-hash-matches-commit": "Re-hashing the revealed local seed matches the hash committed before the draw — the platform locked in this exact secret seed in advance and did not swap it.",
+  "beacon-mix": "The final seed equals SHA-256(local seed ‖ beacon value). The outcome's seed is fixed by BOTH the platform's seed and the public drand value, so neither side alone controls it.",
+  "beacon-pulse-matches-commit": "The beacon pulse used is the exact pulse number named in the commitment — chosen before that pulse's random value existed.",
+  "future-pulse-anti-grind": "The pulse was scheduled to publish AFTER the commit, so the platform could not have known the random value (and therefore the winners) when it committed.",
+  "pool-digest-matches-commit": "Re-digesting the published pool of eligible entries matches the digest committed before the draw — the entrant set was frozen, with none added or removed afterward.",
+  "winners-reproduced": "Running the open selection algorithm on (pool, final seed) reproduces exactly the published winners — they were not hand-picked.",
+  "winner-digest-consistent": "The winners list matches its recorded digest, so it was not edited after the fact.",
+  "allocation-digest-matches-commit": "The full instant-prize allocation matches the digest committed before sales opened — the complete set of winning tickets was sealed in advance.",
+  "sealed-before-sales": "The commitment is a timestamped, tamper-evident ledger record written when tickets were minted.",
+  "allocation-reproduced-from-seed": "The entire ticket→prize allocation re-derives from the disclosed seed using the open algorithm.",
+  "seed-decodes": "The final seed value is well-formed.",
+  "local-seed-decodes": "The local seed value is well-formed.",
+};
+
+// ---- independent drand panel ----
+async function drandPanel(bundle) {
+  const pulse = bundle?.reveal?.beaconPulse;
+  const expected = bundle?.reveal?.beaconValue;
+  const chain = (bundle?.commit?.beaconChain || DRAND_DEFAULT).replace(/\/+$/, "");
+  if (!pulse || !expected) {
+    return `<div class="section"><h4>Independent beacon</h4><span class="why">No external beacon disclosed — this draw used a platform-trusted (degraded / local-only) seed.</span></div>`;
+  }
+  let rows = "";
+  try {
+    const got = await fetch(`${chain}/public/${pulse}`).then(r => r.json());
+    const match = got.randomness === expected;
+    rows += `<div class="beaconrow"><span class="mark ${match?'ok':'bad'}">${match?'PASS':'FAIL'}</span>
+      <span>drand pulse <code>${esc(pulse)}</code> randomness ${match?'matches':'does NOT match'} the revealed beacon value</span></div>
+      <div class="formula">drand says&nbsp; <span class="${match?'eq-ok':'eq-bad'}">${esc(got.randomness||'')}</span><br>reveal says ${esc(expected)}</div>`;
+    // independent scheduled-time check from the chain's own genesis + period.
+    // Only future-pulse draws (reveal.beaconPulseTime set) claim the pulse
+    // post-dates the commit; instant allocations and latest-pulse draws mix the
+    // most recent already-published pulse, so the check does not apply to them
+    // (mirrors the Go verifier's future-pulse-anti-grind gating).
+    if (bundle?.reveal?.beaconPulseTime) {
+      try {
+        const info = await fetch(`${chain}/info`).then(r => r.json());
+        const schedUnix = info.genesis_time + (Number(pulse) - 1) * info.period;
+        const schedISO = new Date(schedUnix * 1000).toISOString().replace(".000","");
+        const commitISO = bundle?.commit?.committedAt || "";
+        const after = commitISO && (schedUnix * 1000 > Date.parse(commitISO));
+        rows += `<div class="beaconrow" style="margin-top:8px"><span class="mark ${after?'ok':'bad'}">${after?'PASS':'FAIL'}</span>
+          <span>pulse scheduled at <code>${esc(schedISO)}</code> ${after?'is after':'is NOT after'} commit <code>${esc(commitISO)}</code></span></div>
+          <div class="formula">scheduled = genesis(${info.genesis_time}) + (pulse−1)·period(${info.period}s), computed from drand /info — not from this server</div>`;
+      } catch(e) { rows += `<div class="why" style="margin-top:6px">Could not fetch drand chain info to recompute the schedule: ${esc(e.message)}</div>`; }
+    } else {
+      rows += `<div class="why" style="margin-top:6px">This draw mixed the <strong>latest already-published</strong> pulse rather than
+        nominating a future one${bundle?.kind === "INSTANT" ? " (an instant allocation must exist before sales open, so it cannot wait for an unpublished pulse)" : ""}.
+        The binding guarantee here is the tamper-evident commitment recorded ${bundle?.kind === "INSTANT" ? "before any ticket went on sale" : "before the draw"},
+        not the pulse's publication time — so no scheduled-after-commit check applies.</div>`;
+    }
+  } catch (e) {
+    rows = `<div class="beaconrow"><span class="mark bad">FAIL</span><span>Could not reach the public drand relay: ${esc(e.message)}</span></div>`;
+  }
+  return `<div class="section"><h4>Independent beacon — fetched from ${esc(chain)}</h4>${rows}</div>`;
+}
+
+// ---- per-check "show the work" for the two recomputable SHA-256 checks ----
+async function checkWork(name, b) {
+  try {
+    if (name === "local-seed-hash-matches-commit" && b.reveal?.localSeed) {
+      const computed = await sha256hex(hexToBytes(b.reveal.localSeed));
+      const ok = computed === b.commit?.seedHash;
+      return `<div class="formula">SHA-256(localSeed) = <span class="${ok?'eq-ok':'eq-bad'}">${esc(computed)}</span><br>committed&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= ${esc(b.commit?.seedHash||'')}</div>`;
+    }
+    if (name === "beacon-mix" && b.reveal?.localSeed && b.reveal?.beaconValue) {
+      const computed = await sha256hex(concat(hexToBytes(b.reveal.localSeed), hexToBytes(b.reveal.beaconValue)));
+      const ok = computed === b.reveal?.seed;
+      return `<div class="formula">SHA-256(localSeed ‖ beaconValue) = <span class="${ok?'eq-ok':'eq-bad'}">${esc(computed)}</span><br>final seed&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= ${esc(b.reveal?.seed||'')}</div>`;
+    }
+  } catch (e) { return `<div class="why">(could not recompute: ${esc(e.message)})</div>`; }
+  return "";
+}
+
+// ---- main bundle renderer ----
+async function renderBundle(b, idx) {
+  let res;
+  try { res = JSON.parse(drawverify(JSON.stringify(b))); }
+  catch (e) { return errorCard(`Bundle #${idx+1}`, "verifier not loaded: " + e.message); }
+
+  const div = document.createElement("div");
+  div.className = "result";
+  const label = b.id || `${b.kind || "BUNDLE"} #${idx+1}`;
+  if (res.error) { div.innerHTML = `<div class="rhead"><span class="label">${esc(label)}</span><span class="verdict bad">ERROR — ${esc(res.error)}</span></div>`; return div; }
+
+  const verdict = res.ok
+    ? `<span class="verdict ok">VERIFIED — reproducible &amp; unaltered</span>`
+    : `<span class="verdict bad">FAILED — could not be verified</span>`;
+
+  const c = b.commit || {}, r = b.reveal || {};
+  const poolN = (b.pool || []).length;
+  const allocN = b.allocation ? Object.keys(b.allocation).length : 0;
+
+  // committed-beforehand panel
+  let committed = `<div class="kv">${kvRow("committed at", c.committedAt)}${kvRow("seed hash", c.seedHash)}${kvRow("input digest", c.inputDigest)}${kvRow("beacon pulse #", c.beaconPulse)}${kvRow("beacon chain", c.beaconChain)}</div>`;
+
+  // revealed panel (inputs/outputs labelled)
+  let revealed = `<div class="kv">`;
+  revealed += kvRow("local seed", r.localSeed, "in");
+  if (r.beaconValue) revealed += kvRow("beacon value", r.beaconValue, "in");
+  if (b.pool) revealed += kvRow(`pool (${poolN} entries)`, (b.pool.slice(0,8).join(", ") + (poolN>8?` … +${poolN-8} more`:"")), "in");
+  if (b.allocation) revealed += kvRow(`allocation (${allocN})`, Object.entries(b.allocation).slice(0,4).map(([k,v])=>`${k}→${v}`).join("  ") + (allocN>4?` …`:""), "in");
+  revealed += kvRow("final seed", r.seed, "out");
+  if (r.winners) revealed += kvRow(`winners (${r.winners.length})`, r.winners.join(", "), "out");
+  if (r.winnerDigest) revealed += kvRow("winner digest", r.winnerDigest, "out");
+  if (r.resultedAt) revealed += kvRow("resulted at", r.resultedAt);
+  revealed += `</div>`;
+
+  // checks (with explanations + recomputed work)
+  const works = await Promise.all((res.checks||[]).map(ch => checkWork(ch.name, b)));
+  const checks = (res.checks||[]).map((ch,i) => `
+    <div class="check">
+      <div class="top"><span class="mark ${ch.ok?'ok':'bad'}">${ch.ok?'PASS':'FAIL'}</span>
+        <span><span class="name">${esc(ch.name)}</span>${ch.detail?` <span class="why">— ${esc(ch.detail)}</span>`:""}</span></div>
+      ${WHY[ch.name]?`<div class="why">${esc(WHY[ch.name])}</div>`:""}
+      ${works[i]?`<div class="work">${works[i]}</div>`:""}
+    </div>`).join("");
+
+  const beacon = await drandPanel(b);
+
+  div.innerHTML =
+    `<div class="rhead"><span class="label">${esc(label)}</span><span class="kind">${esc(b.kind||"")}</span>${verdict}</div>
+     <div class="section"><h4>Committed before the draw</h4>${committed}</div>
+     <div class="section"><h4>Revealed after the draw &nbsp;·&nbsp; <span style="color:var(--in)">INPUT</span> → <span style="color:var(--out)">OUTPUT</span></h4>${revealed}</div>
+     ${beacon}
+     <div class="section"><h4>Checks (recomputed in your browser)</h4>${checks}
+       <details class="raw"><summary>Show raw proof bundle JSON</summary><pre>${esc(JSON.stringify(b,null,2))}</pre></details>
+     </div>`;
+  return div;
+}
+
+function errorCard(label, msg){ const d=document.createElement("div"); d.className="result";
+  d.innerHTML=`<div class="rhead"><span class="label">${esc(label)}</span><span class="verdict bad">ERROR — ${esc(msg)}</span></div>`; return d; }
+
+async function renderAll(bundles) {
+  const out = document.getElementById("output");
+  out.innerHTML = "";
+  if (!bundles.length) { out.appendChild(errorCard("No proofs", "Nothing to verify — the round may not be finalised yet, or no draw has run.")); return; }
+  for (let i=0;i<bundles.length;i++) out.appendChild(await renderBundle(bundles[i], i));
+}
+
+async function verifyRound() {
+  const id = document.getElementById("roundId").value.trim();
+  const base = (document.getElementById("baseUrl").value.trim() || "").replace(/\/+$/, "");
+  const status = document.getElementById("statusRound");
+  if (!/^\d+$/.test(id)) { status.textContent = "Enter a numeric round ID."; return; }
+  status.textContent = "Loading proof feed…"; await wasmReady;
+  try {
+    const body = await fetch(`${base}/v2/raffles/rounds/${id}/verification`).then(r => r.json());
+    const bundles = Array.isArray(body) ? body : (body.data || []);
+    status.textContent = `Loaded ${bundles.length} proof bundle(s).`;
+    await renderAll(bundles);
+  } catch (e) { status.textContent = "Failed to load: " + e.message; }
+}
+
+async function verifyPaste() {
+  const status = document.getElementById("statusPaste"); await wasmReady;
+  let parsed;
+  try { parsed = JSON.parse(document.getElementById("bundleText").value); }
+  catch (e) { status.textContent = "Invalid JSON: " + e.message; return; }
+  const bundles = Array.isArray(parsed) ? parsed : (parsed.data && Array.isArray(parsed.data) ? parsed.data : [parsed]);
+  status.textContent = `Verifying ${bundles.length} bundle(s)…`;
+  await renderAll(bundles);
+}
+
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("active")); t.classList.add("active");
+  document.getElementById("pane-round").style.display = t.dataset.tab === "round" ? "" : "none";
+  document.getElementById("pane-paste").style.display = t.dataset.tab === "paste" ? "" : "none";
+});
+document.getElementById("verifyRound").onclick = verifyRound;
+document.getElementById("verifyPaste").onclick = verifyPaste;
+</script>
+</body>
+</html>
