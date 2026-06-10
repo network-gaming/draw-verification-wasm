@@ -19,10 +19,13 @@ trusting the platform**.
 ## Verify a draw
 
 **In a browser.** Serve `docs/` from any static host and open it
-(`python3 -m http.server -d docs` works), or use the platform-hosted copy at
-`<platform>/v2/verify/`. Enter a round ID — the page loads the public proof
-feed `GET /v2/raffles/rounds/<id>/verification` (no authentication; proofs are
-published once a promotion is finalised) — or paste a saved proof bundle.
+(`python3 -m http.server -d docs` works), then paste a proof bundle — the
+response of the platform's public proof feed
+`GET <platform>/v2/raffles/rounds/<id>/verification` or
+`/v2/raffles/draws/<id>/verification` (no authentication; proofs are published
+once a promotion is finalised), or a previously saved bundle. The
+platform-hosted copy at `<platform>/v2/verify/` additionally loads the feed
+directly by round ID (it is same-origin with the API).
 
 **As a Go library.**
 

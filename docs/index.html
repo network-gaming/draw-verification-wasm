@@ -15,12 +15,7 @@
   label { display:block; font-size:13px; color:var(--muted); margin-bottom:6px; }
   input[type=text], textarea { width:100%; background:#0c0e12; color:var(--fg); border:1px solid var(--line); border-radius:7px; padding:10px 12px; font:inherit; }
   textarea { min-height:110px; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }
-  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
-  .row > div { flex:1; min-width:170px; }
   button { background:var(--accent); color:#0b0d11; border:0; border-radius:7px; padding:10px 18px; font:600 14px/1 inherit; cursor:pointer; }
-  .tabs { display:flex; gap:8px; margin-bottom:14px; }
-  .tab { padding:6px 12px; border:1px solid var(--line); border-radius:999px; color:var(--muted); cursor:pointer; font-size:13px; }
-  .tab.active { color:var(--fg); border-color:var(--accent); }
   .status { font-size:13px; color:var(--muted); margin:8px 0 0; }
   details.how { background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:10px 14px; margin-bottom:16px; }
   details.how summary { cursor:pointer; color:var(--accent); font-weight:600; }
@@ -82,24 +77,12 @@
   </details>
 
   <div class="card">
-    <div class="tabs">
-      <div class="tab active" data-tab="round">By round</div>
-      <div class="tab" data-tab="paste">Paste a proof bundle</div>
-    </div>
-    <div id="pane-round">
-      <div class="row">
-        <div><label>Round ID</label><input id="roundId" type="text" inputmode="numeric" placeholder="e.g. 42" /></div>
-        <div><label>API base URL</label><input id="baseUrl" type="text" placeholder="(defaults to this site)" /></div>
-        <div style="flex:0 0 auto;"><button id="verifyRound">Verify round</button></div>
-      </div>
-      <p class="status" id="statusRound">Loads <code>/v2/raffles/rounds/&lt;id&gt;/verification</code></p>
-    </div>
-    <div id="pane-paste" style="display:none;">
-      <label>Proof bundle JSON (a single bundle, or an array)</label>
-      <textarea id="bundleText" placeholder='{"kind":"MAIN_DRAW","pool":[...],"commit":{...},"reveal":{...}}'></textarea>
-      <div style="margin-top:10px;"><button id="verifyPaste">Verify bundle</button></div>
-      <p class="status" id="statusPaste"></p>
-    </div>
+    <label>Proof bundle JSON (a single bundle, or an array)</label>
+    <textarea id="bundleText" placeholder='{"kind":"MAIN_DRAW","pool":[...],"commit":{...},"reveal":{...}}'></textarea>
+    <div style="margin-top:10px;"><button id="verifyPaste">Verify bundle</button></div>
+    <p class="status" id="statusPaste">Paste the response of the platform's public proof feed
+      (<code>GET &lt;platform&gt;/v2/raffles/rounds/&lt;id&gt;/verification</code> or
+      <code>/v2/raffles/draws/&lt;id&gt;/verification</code>), or a saved bundle.</p>
   </div>
 
   <div id="output"></div>
@@ -267,20 +250,6 @@ async function renderAll(bundles) {
   for (let i=0;i<bundles.length;i++) out.appendChild(await renderBundle(bundles[i], i));
 }
 
-async function verifyRound() {
-  const id = document.getElementById("roundId").value.trim();
-  const base = (document.getElementById("baseUrl").value.trim() || "").replace(/\/+$/, "");
-  const status = document.getElementById("statusRound");
-  if (!/^\d+$/.test(id)) { status.textContent = "Enter a numeric round ID."; return; }
-  status.textContent = "Loading proof feed…"; await wasmReady;
-  try {
-    const body = await fetch(`${base}/v2/raffles/rounds/${id}/verification`).then(r => r.json());
-    const bundles = Array.isArray(body) ? body : (body.data || []);
-    status.textContent = `Loaded ${bundles.length} proof bundle(s).`;
-    await renderAll(bundles);
-  } catch (e) { status.textContent = "Failed to load: " + e.message; }
-}
-
 async function verifyPaste() {
   const status = document.getElementById("statusPaste"); await wasmReady;
   let parsed;
@@ -291,12 +260,6 @@ async function verifyPaste() {
   await renderAll(bundles);
 }
 
-document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
-  document.querySelectorAll(".tab").forEach(x => x.classList.remove("active")); t.classList.add("active");
-  document.getElementById("pane-round").style.display = t.dataset.tab === "round" ? "" : "none";
-  document.getElementById("pane-paste").style.display = t.dataset.tab === "paste" ? "" : "none";
-});
-document.getElementById("verifyRound").onclick = verifyRound;
 document.getElementById("verifyPaste").onclick = verifyPaste;
 </script>
 </body>
