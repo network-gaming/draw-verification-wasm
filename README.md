@@ -111,6 +111,36 @@ concatenation ambiguity. The pool digest sorts items first
 iterates ticket numbers in ascending numeric order, framing
 `decimal(ticketNumber)` then the prize reference.
 
+## Instant Wins v2: constrained prize pattern over sale positions
+
+From algorithm version 2 (`commit.algorithmVersion == 2`) instant prizes are
+placed on **sale positions** (1 = first ticket sold) rather than ticket
+numbers, under a per-round rule set drawn from a fixed vocabulary, and tickets
+are issued in position order at purchase. There is no randomness at purchase.
+
+- **Rules** (`InstantRules`, canonicalised by `CanonicalRules`): `WINDOW` and
+  `EXCLUDE` restrict where matching prizes may land and are placed directly;
+  `MIN_GAP` and `DENSITY` are enforced by bounded rejection from the same DRBG
+  stream, with the attempt count recorded in the reveal. Rule *types* are fixed
+  here; rule *values* are per round and their digest is in the commit record.
+- **Placement** (`AllocateInstantPrizesV2`): groups of identical prize units are
+  placed most-constrained first by partial Fisher–Yates over the free positions
+  in their allowed set, so each group is uniform within its window and without
+  replacement. `CheckFeasibility` is seed-free and runs before any randomness.
+- **Display numbers** (`DisplayPermutation`): the ticket number a player sees is
+  a full Fisher–Yates over `[1, M]` from a domain-separated sub-seed
+  (`SHA-256("drawproof/display/v2" || seed)`), digested into the commit.
+- **Preview** (`PreviewInstantPrizes`): the same placement on a discarded
+  `crypto/rand` seed, for operators to visualise rules without deciding anything.
+- **Raw stream** (`NewStream`): unscaled 64-bit DRBG words for lab testing.
+
+The v2 verifier (`VerifyInstantV2FromSeed`) checks, in order: rules digest,
+allocation digest, local-seed hash, beacon mix, reproduction of the allocation
+in exactly the recorded number of attempts, every rule holding on the disclosed
+allocation, and the display permutation digest (plus the published ticket
+numbers when included). Bundles without a disclosed seed get the reduced
+`VerifyInstantV2Sealed` checks. v1 bundles keep the v1 path.
+
 ## What the verifier checks
 
 | Check | Kinds | Proves |

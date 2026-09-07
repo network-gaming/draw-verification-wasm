@@ -31,6 +31,13 @@ type CommitRecord struct {
 	BeaconPulse uint64   `json:"beaconPulse,omitempty"` // nominated beacon pulse number
 	AdminID     int      `json:"adminId,omitempty"`
 	CommittedAt string   `json:"committedAt"` // RFC3339
+
+	// Instant Wins v2 (AlgorithmVersion == AlgorithmVersionV2). Zero / absent
+	// values mean a v1 record.
+	AlgorithmVersion int    `json:"algorithmVersion,omitempty"`
+	RulesDigest      string `json:"rulesDigest,omitempty"`   // SHA-256 of CanonicalRules
+	DisplayDigest    string `json:"displayDigest,omitempty"` // DigestPermutation of the display permutation
+	TotalTickets     int    `json:"totalTickets,omitempty"`  // ticket population, committed before sales
 }
 
 // RevealRecord is written to the immutable ledger AFTER a draw, disclosing the
@@ -49,6 +56,7 @@ type RevealRecord struct {
 	TotalTickets    int      `json:"totalTickets,omitempty"`    // instant: ticket population size, needed to reproduce the allocation
 	AdminID         int      `json:"adminId,omitempty"`         // admin who executed the draw (0 = system/automated)
 	ResultedAt      string   `json:"resultedAt"`                // RFC3339
+	Attempts        int      `json:"attempts,omitempty"`        // instant v2: placement attempts consumed (1 unless rejection rules)
 }
 
 // CommitKey is the immudb key under which a commit is stored.
