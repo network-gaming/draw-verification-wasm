@@ -120,6 +120,13 @@ const WHY = {
   "sealed-before-sales": "The commitment is a timestamped, tamper-evident ledger record written when tickets were minted.",
   "allocation-reproduced-from-seed": "The entire ticket→prize allocation re-derives from the disclosed seed using the open algorithm.",
   "seed-decodes": "The final seed value is well-formed.",
+  "algorithm-version": "The commitment declares Instant Wins v2: prizes were placed on sale positions under committed rules, and tickets were issued in position order with no randomness at purchase.",
+  "rules-digest-matches-commit": "Re-digesting the published placement rules matches the digest committed before the seed existed — the rules could not have been chosen or changed after seeing the pattern.",
+  "rules-satisfied": "Every placed prize obeys every rule that applies to it (position windows, exclusions, gaps, density).",
+  "display-permutation-matches-commit": "The ticket numbers shown to players are a seeded shuffle of the sale positions, reproduced from the same seed and matching the committed digest.",
+  "ticket-numbers-match-permutation": "The published position→ticket-number list equals the reproduced shuffle.",
+  "population-committed": "The total number of tickets was fixed in the commitment before sales.",
+  "seed-sealed": "The seed is still sealed: the round is on sale, so the pattern cannot be reproduced yet. Only the commitment can be checked.",
   "local-seed-decodes": "The local seed value is well-formed.",
 };
 
@@ -203,14 +210,28 @@ async function renderBundle(b, idx) {
   const allocN = b.allocation ? Object.keys(b.allocation).length : 0;
 
   // committed-beforehand panel
-  let committed = `<div class="kv">${kvRow("committed at", c.committedAt)}${kvRow("seed hash", c.seedHash)}${kvRow("input digest", c.inputDigest)}${kvRow("beacon pulse #", c.beaconPulse)}${kvRow("beacon chain", c.beaconChain)}</div>`;
+  let committed = `<div class="kv">${kvRow("committed at", c.committedAt)}${kvRow("seed hash", c.seedHash)}${kvRow("input digest", c.inputDigest)}${kvRow("beacon pulse #", c.beaconPulse)}${kvRow("beacon chain", c.beaconChain)}`;
+  if (c.algorithmVersion) {
+    committed += kvRow("algorithm version", c.algorithmVersion) + kvRow("total tickets", c.totalTickets) + kvRow("rules digest", c.rulesDigest) + kvRow("display digest", c.displayDigest);
+    let rulesTxt = "";
+    try { const rr = JSON.parse(b.rules || "{}"); rulesTxt = (rr.rules||[]).map(x => {
+      const sel = x.unitRef ? x.unitRef : `amount ≥ ${x.minAmount}`;
+      if (x.type === "WINDOW" || x.type === "EXCLUDE") return `${x.type} ${sel}: ${Math.round(x.minFraction*100)}%–${Math.round(x.maxFraction*100)}% of sale`;
+      if (x.type === "MIN_GAP") return `MIN_GAP ${sel}: ≥ ${x.gap} positions apart`;
+      if (x.type === "DENSITY") return `DENSITY ${sel}: ≤ ${x.maxUnits} per ${Math.round(x.segmentFraction*100)}% segment`;
+      return x.type; }).join("; ") || "no rules (unconstrained)"; } catch(e) { rulesTxt = "(unparseable)"; }
+    committed += kvRow("placement rules", rulesTxt);
+  }
+  committed += `</div>`;
 
   // revealed panel (inputs/outputs labelled)
   let revealed = `<div class="kv">`;
   revealed += kvRow("local seed", r.localSeed, "in");
   if (r.beaconValue) revealed += kvRow("beacon value", r.beaconValue, "in");
   if (b.pool) revealed += kvRow(`pool (${poolN} entries)`, (b.pool.slice(0,8).join(", ") + (poolN>8?` … +${poolN-8} more`:"")), "in");
-  if (b.allocation) revealed += kvRow(`allocation (${allocN})`, Object.entries(b.allocation).slice(0,4).map(([k,v])=>`${k}→${v}`).join("  ") + (allocN>4?` …`:""), "in");
+  if (b.allocation) revealed += kvRow(`allocation (${allocN})${c.algorithmVersion?" by sale position":""}`, Object.entries(b.allocation).slice(0,4).map(([k,v])=>`${k}→${v}`).join("  ") + (allocN>4?` …`:""), "in");
+  if (r.attempts) revealed += kvRow("placement attempts", r.attempts, "out");
+  if (b.ticketNumbers) revealed += kvRow(`ticket numbers (${b.ticketNumbers.length})`, b.ticketNumbers.slice(0,10).join(", ") + (b.ticketNumbers.length>10?" …":""), "out");
   revealed += kvRow("final seed", r.seed, "out");
   if (r.winners) revealed += kvRow(`winners (${r.winners.length})`, r.winners.join(", "), "out");
   if (r.winnerDigest) revealed += kvRow("winner digest", r.winnerDigest, "out");
