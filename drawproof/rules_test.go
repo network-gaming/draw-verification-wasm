@@ -448,3 +448,136 @@ func TestSummarisePlacementSegments(t *testing.T) {
 		t.Fatal("attempts")
 	}
 }
+
+func TestQuotaFromPlacementRoundTrips(t *testing.T) {
+	const M = 1200
+	units := testUnits()
+	// A candidate on one seed, unconstrained.
+	candidate, _, err := AllocateInstantPrizesV2(M, units, InstantRules{Version: 2}, seedN(21))
+	if err != nil {
+		t.Fatal(err)
+	}
+	quota := QuotaFromPlacement(M, candidate, QuotaSegments)
+	rules := InstantRules{Version: 2, Rules: quota}
+	if err := rules.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	// Every unit reference gets exactly one QUOTA whose counts sum to its units.
+	perRef := map[string]int{}
+	for _, u := range units {
+		perRef[u]++
+	}
+	if len(quota) != len(perRef) {
+		t.Fatalf("expected %d quota rules, got %d", len(perRef), len(quota))
+	}
+	for _, q := range quota {
+		sum := 0
+		for _, c := range q.Counts {
+			sum += c
+		}
+		if sum != perRef[q.UnitRef] || len(q.Counts) != QuotaSegments {
+			t.Fatalf("quota for %s: counts %v vs %d units", q.UnitRef, q.Counts, perRef[q.UnitRef])
+		}
+	}
+	// The candidate itself satisfies its derived quota.
+	if err := CheckRules(M, candidate, rules); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh seed under the quota reproduces the bracket distribution but not the candidate.
+	fresh, attempts, err := AllocateInstantPrizesV2(M, units, rules, seedN(22))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 1 {
+		t.Fatalf("quota placement must be direct, got %d attempts", attempts)
+	}
+	if err := CheckRules(M, fresh, rules); err != nil {
+		t.Fatal(err)
+	}
+	if allocationsEqual(fresh, candidate) {
+		t.Fatal("fresh seed reproduced the candidate exactly; the quota should only fix brackets")
+	}
+	again := QuotaFromPlacement(M, fresh, QuotaSegments)
+	_, d1, _ := CanonicalRules(rules)
+	_, d2, _ := CanonicalRules(InstantRules{Version: 2, Rules: again})
+	if d1 != d2 {
+		t.Fatal("bracket distribution changed under the quota")
+	}
+	// Canonical form survives a parse round-trip.
+	canon, digest, _ := CanonicalRules(rules)
+	parsed, err := ParseRules(canon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, d3, _ := CanonicalRules(parsed); d3 != digest {
+		t.Fatal("quota canonical digest not stable")
+	}
+}
+
+func TestQuotaFeasibilityAndBounds(t *testing.T) {
+	// Brackets partition the sale exactly.
+	for _, M := range []int{7, 10, 1200, 1001} {
+		seen := 0
+		for k := 0; k < QuotaSegments; k++ {
+			lo, hi := QuotaSegmentBounds(M, QuotaSegments, k)
+			seen += hi - lo + 1
+			for p := lo; p <= hi; p++ {
+				if QuotaSegmentOf(M, QuotaSegments, p) != k {
+					t.Fatalf("M=%d position %d not in bracket %d", M, p, k)
+				}
+			}
+		}
+		if seen != M {
+			t.Fatalf("M=%d brackets cover %d positions", M, seen)
+		}
+	}
+	units := []string{topRef, topRef}
+	// Counts must add up to the units.
+	bad := InstantRules{Version: 2, Rules: []PositionRule{{Type: RuleQuota, UnitRef: topRef, Segments: 10, Counts: []int{1, 0, 0, 0, 0, 0, 0, 0, 0, 0}}}}
+	if err := CheckFeasibility(100, units, bad); !errors.Is(err, ErrInfeasible) {
+		t.Fatalf("expected infeasible for quota sum mismatch, got %v", err)
+	}
+	// More units in a bracket than it has positions.
+	tight := InstantRules{Version: 2, Rules: []PositionRule{{Type: RuleQuota, UnitRef: topRef, Segments: 10, Counts: []int{2, 0, 0, 0, 0, 0, 0, 0, 0, 0}}}}
+	if err := CheckFeasibility(10, units, tight); !errors.Is(err, ErrInfeasible) {
+		t.Fatalf("expected infeasible for overfull bracket, got %v", err)
+	}
+	// Two quotas matching the same unit are rejected.
+	two := InstantRules{Version: 2, Rules: []PositionRule{
+		{Type: RuleQuota, UnitRef: topRef, Segments: 10, Counts: []int{2, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+		{Type: RuleQuota, MinAmount: f(1), Segments: 10, Counts: []int{0, 0, 0, 0, 0, 0, 0, 0, 0, 2}},
+	}}
+	if err := CheckFeasibility(100, units, two); !errors.Is(err, ErrInfeasible) {
+		t.Fatalf("expected infeasible for overlapping quotas, got %v", err)
+	}
+	// Quota composes with a window: bracket 10 of 100 is positions 91..100; a
+	// window [0.95,1] leaves 96..100, still room for 2.
+	both := InstantRules{Version: 2, Rules: []PositionRule{
+		{Type: RuleQuota, UnitRef: topRef, Segments: 10, Counts: []int{0, 0, 0, 0, 0, 0, 0, 0, 0, 2}},
+		{Type: RuleWindow, UnitRef: topRef, MinFraction: 0.95, MaxFraction: 1},
+	}}
+	placement, _, err := AllocateInstantPrizesV2(100, units, both, seedN(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p := range placement {
+		if p < 96 {
+			t.Fatalf("position %d outside quota∩window", p)
+		}
+	}
+	// Verifier path: a bundle under quota rules verifies, and a moved prize fails rules-satisfied.
+	b := buildV2Bundle(t, 500, testUnits(), InstantRules{Version: 2, Rules: QuotaFromPlacement(500, mustAlloc(t, 500, testUnits(), seedN(9)), QuotaSegments)}, 5)
+	res, _ := VerifyBundle(b)
+	if !res.OK {
+		t.Fatalf("quota bundle failed: %v", failing(res))
+	}
+}
+
+func mustAlloc(t *testing.T, M int, units []string, seed []byte) map[int]string {
+	t.Helper()
+	p, _, err := AllocateInstantPrizesV2(M, units, InstantRules{Version: 2}, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}

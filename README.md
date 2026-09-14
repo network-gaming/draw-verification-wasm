@@ -120,8 +120,12 @@ are issued in position order at purchase. There is no randomness at purchase.
 
 - **Rules** (`InstantRules`, canonicalised by `CanonicalRules`): `WINDOW` and
   `EXCLUDE` restrict where matching prizes may land and are placed directly;
-  `MIN_GAP` and `DENSITY` are enforced by bounded rejection from the same DRBG
-  stream, with the attempt count recorded in the reveal. Rule *types* are fixed
+  `QUOTA` fixes how many matching prizes land in each of N equal brackets of
+  the sale (also placed directly, one Fisher–Yates per bracket) and is what
+  `QuotaFromPlacement` derives from an operator-chosen candidate so the
+  candidate itself can be discarded; `MIN_GAP` and `DENSITY` are enforced by
+  bounded rejection from the same DRBG stream, with the attempt count recorded
+  in the reveal. Rule *types* are fixed
   here; rule *values* are per round and their digest is in the commit record.
 - **Placement** (`AllocateInstantPrizesV2`): groups of identical prize units are
   placed most-constrained first by partial Fisher–Yates over the free positions
