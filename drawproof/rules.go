@@ -44,7 +44,19 @@ const (
 	// RuleDensity: at most MaxUnits matching units in any segment of
 	// SegmentFraction of the sale. Enforced by bounded rejection.
 	RuleDensity RuleType = "DENSITY"
+	// RuleQuota: exactly Counts[k] matching units land in segment k of
+	// Segments equal segments of the sale. Placed directly, no discards. This
+	// is how an operator-chosen "shape" of the sale is expressed: the quota
+	// fixes how many prizes fall in each bracket, the RNG alone decides where
+	// inside the bracket.
+	RuleQuota RuleType = "QUOTA"
 )
+
+// QuotaSegments is the bracket resolution used when a quota is derived from a
+// candidate placement (QuotaFromPlacement). Ten brackets keep enough
+// randomness inside each bracket that knowing the quota does not locate a
+// prize.
+const QuotaSegments = 10
 
 // PositionRule is one admin-entered rule. Exactly one selector must be set:
 // UnitRef (one prize unit reference) or MinAmount (every unit whose reference
@@ -58,6 +70,8 @@ type PositionRule struct {
 	Gap             int      `json:"gap,omitempty"`
 	SegmentFraction float64  `json:"segmentFraction,omitempty"`
 	MaxUnits        int      `json:"maxUnits,omitempty"`
+	Segments        int      `json:"segments,omitempty"` // QUOTA: number of equal brackets
+	Counts          []int    `json:"counts,omitempty"`   // QUOTA: units per bracket, len == Segments
 }
 
 // InstantRules is the complete per-round rule set.
@@ -117,14 +131,14 @@ func (r InstantRules) Validate() error {
 			if pr.MinFraction < 0 || pr.MaxFraction > 1 || pr.MinFraction >= pr.MaxFraction {
 				return fmt.Errorf("rule %d: need 0 <= minFraction < maxFraction <= 1", i)
 			}
-			if pr.Gap != 0 || pr.SegmentFraction != 0 || pr.MaxUnits != 0 {
+			if pr.Gap != 0 || pr.SegmentFraction != 0 || pr.MaxUnits != 0 || pr.Segments != 0 || len(pr.Counts) != 0 {
 				return fmt.Errorf("rule %d: %s takes only minFraction/maxFraction", i, pr.Type)
 			}
 		case RuleMinGap:
 			if pr.Gap < 1 {
 				return fmt.Errorf("rule %d: gap must be >= 1", i)
 			}
-			if pr.MinFraction != 0 || pr.MaxFraction != 0 || pr.SegmentFraction != 0 || pr.MaxUnits != 0 {
+			if pr.MinFraction != 0 || pr.MaxFraction != 0 || pr.SegmentFraction != 0 || pr.MaxUnits != 0 || pr.Segments != 0 || len(pr.Counts) != 0 {
 				return fmt.Errorf("rule %d: MIN_GAP takes only gap", i)
 			}
 		case RuleDensity:
@@ -134,8 +148,23 @@ func (r InstantRules) Validate() error {
 			if pr.MaxUnits < 0 {
 				return fmt.Errorf("rule %d: maxUnits must be >= 0", i)
 			}
-			if pr.MinFraction != 0 || pr.MaxFraction != 0 || pr.Gap != 0 {
+			if pr.MinFraction != 0 || pr.MaxFraction != 0 || pr.Gap != 0 || pr.Segments != 0 || len(pr.Counts) != 0 {
 				return fmt.Errorf("rule %d: DENSITY takes only segmentFraction/maxUnits", i)
+			}
+		case RuleQuota:
+			if pr.Segments < 2 || pr.Segments > 100 {
+				return fmt.Errorf("rule %d: QUOTA needs 2 <= segments <= 100", i)
+			}
+			if len(pr.Counts) != pr.Segments {
+				return fmt.Errorf("rule %d: QUOTA needs exactly %d counts, got %d", i, pr.Segments, len(pr.Counts))
+			}
+			for k, c := range pr.Counts {
+				if c < 0 {
+					return fmt.Errorf("rule %d: QUOTA count for segment %d must be >= 0", i, k+1)
+				}
+			}
+			if pr.MinFraction != 0 || pr.MaxFraction != 0 || pr.Gap != 0 || pr.SegmentFraction != 0 || pr.MaxUnits != 0 {
+				return fmt.Errorf("rule %d: QUOTA takes only segments/counts", i)
 			}
 		default:
 			return fmt.Errorf("rule %d: unknown rule type %q", i, pr.Type)
@@ -154,6 +183,8 @@ type canonicalRule struct {
 	Gap             int      `json:"gap,omitempty"`
 	SegmentFraction *float64 `json:"segmentFraction,omitempty"`
 	MaxUnits        *int     `json:"maxUnits,omitempty"`
+	Segments        int      `json:"segments,omitempty"`
+	Counts          []int    `json:"counts,omitempty"`
 }
 
 type canonicalRules struct {
@@ -171,7 +202,8 @@ func canonicalKey(r PositionRule) string {
 	}
 	return string(r.Type) + "\x00" + r.UnitRef + "\x00" + amt + "\x00" +
 		fmtFloat(r.MinFraction) + "\x00" + fmtFloat(r.MaxFraction) + "\x00" +
-		strconv.Itoa(r.Gap) + "\x00" + fmtFloat(r.SegmentFraction) + "\x00" + strconv.Itoa(r.MaxUnits)
+		strconv.Itoa(r.Gap) + "\x00" + fmtFloat(r.SegmentFraction) + "\x00" + strconv.Itoa(r.MaxUnits) +
+		"\x00" + strconv.Itoa(r.Segments) + "\x00" + fmt.Sprint(r.Counts)
 }
 
 // CanonicalRules returns the canonical JSON encoding of a rule set and its
@@ -204,6 +236,9 @@ func CanonicalRules(r InstantRules) (string, string, error) {
 			sf := pr.SegmentFraction
 			mu := pr.MaxUnits
 			c.SegmentFraction, c.MaxUnits = &sf, &mu
+		case RuleQuota:
+			c.Segments = pr.Segments
+			c.Counts = append([]int(nil), pr.Counts...)
 		}
 		cr.Rules = append(cr.Rules, c)
 	}
@@ -293,6 +328,51 @@ func SegmentLength(totalTickets int, fraction float64) int {
 	return l
 }
 
+// QuotaSegmentBounds returns the inclusive 1-based position range of bracket k
+// (0-based) when the sale is split into `segments` equal brackets. Brackets
+// partition [1, totalTickets] exactly: bracket k is
+// (floor(k*M/S), floor((k+1)*M/S)].
+func QuotaSegmentBounds(totalTickets, segments, k int) (lo, hi int) {
+	lo = k*totalTickets/segments + 1
+	hi = (k + 1) * totalTickets / segments
+	return lo, hi
+}
+
+// QuotaSegmentOf returns the 0-based bracket a position falls in.
+func QuotaSegmentOf(totalTickets, segments, position int) int {
+	for k := 0; k < segments; k++ {
+		if lo, hi := QuotaSegmentBounds(totalTickets, segments, k); position >= lo && position <= hi {
+			return k
+		}
+	}
+	return segments - 1
+}
+
+// QuotaFromPlacement derives QUOTA rules from a candidate placement: one rule
+// per unit reference with the number of units that landed in each of
+// `segments` brackets. This is the operator-facing "use this shape" step: the
+// candidate itself is discarded, only its bracket distribution is kept, and a
+// fresh seed places prizes inside the brackets at mint.
+func QuotaFromPlacement(totalTickets int, placement map[int]string, segments int) []PositionRule {
+	perRef := map[string][]int{}
+	for p, ref := range placement {
+		if _, ok := perRef[ref]; !ok {
+			perRef[ref] = make([]int, segments)
+		}
+		perRef[ref][QuotaSegmentOf(totalTickets, segments, p)]++
+	}
+	refs := make([]string, 0, len(perRef))
+	for ref := range perRef {
+		refs = append(refs, ref)
+	}
+	sort.Strings(refs)
+	rules := make([]PositionRule, 0, len(refs))
+	for _, ref := range refs {
+		rules = append(rules, PositionRule{Type: RuleQuota, UnitRef: ref, Segments: segments, Counts: perRef[ref]})
+	}
+	return rules
+}
+
 // allowedSet computes the positions (1-based, index 0 unused) a unit may occupy
 // after applying every WINDOW and EXCLUDE rule that matches it.
 func allowedSet(totalTickets int, ref string, rules InstantRules) []bool {
@@ -327,6 +407,22 @@ type unitGroup struct {
 	count   int
 	allowed []bool
 	size    int // number of allowed positions
+	segment int // QUOTA sub-group bracket (0-based), -1 otherwise
+}
+
+// quotaFor returns the single QUOTA rule matching a unit reference, or nil.
+// More than one is rejected by CheckFeasibility.
+func quotaFor(ref string, rules InstantRules) (*PositionRule, int) {
+	var found *PositionRule
+	n := 0
+	for i := range rules.Rules {
+		pr := &rules.Rules[i]
+		if pr.Type == RuleQuota && pr.Matches(ref) {
+			found = pr
+			n++
+		}
+	}
+	return found, n
 }
 
 // buildGroups groups units by reference, computes allowed sets, and orders the
@@ -346,19 +442,44 @@ func buildGroups(totalTickets int, units []string, rules InstantRules) []*unitGr
 	groups := make([]*unitGroup, 0, len(order))
 	for _, ref := range order {
 		g := byRef[ref]
-		g.allowed = allowedSet(totalTickets, ref, rules)
-		for p := 1; p <= totalTickets; p++ {
-			if g.allowed[p] {
-				g.size++
+		g.segment = -1
+		base := allowedSet(totalTickets, ref, rules)
+		q, _ := quotaFor(ref, rules)
+		if q == nil {
+			g.allowed = base
+			for p := 1; p <= totalTickets; p++ {
+				if g.allowed[p] {
+					g.size++
+				}
 			}
+			groups = append(groups, g)
+			continue
 		}
-		groups = append(groups, g)
+		// One sub-group per bracket with a non-zero quota, restricted to that
+		// bracket's positions (intersected with any window/exclusion).
+		for k := 0; k < q.Segments; k++ {
+			if q.Counts[k] == 0 {
+				continue
+			}
+			lo, hi := QuotaSegmentBounds(totalTickets, q.Segments, k)
+			sg := &unitGroup{ref: ref, count: q.Counts[k], segment: k, allowed: make([]bool, totalTickets+1)}
+			for p := lo; p <= hi; p++ {
+				if base[p] {
+					sg.allowed[p] = true
+					sg.size++
+				}
+			}
+			groups = append(groups, sg)
+		}
 	}
 	sort.SliceStable(groups, func(i, j int) bool {
 		if groups[i].size != groups[j].size {
 			return groups[i].size < groups[j].size
 		}
-		return groups[i].ref < groups[j].ref
+		if groups[i].ref != groups[j].ref {
+			return groups[i].ref < groups[j].ref
+		}
+		return groups[i].segment < groups[j].segment
 	})
 	return groups
 }
@@ -379,9 +500,34 @@ func CheckFeasibility(totalTickets int, units []string, rules InstantRules) erro
 	if len(units) > totalTickets {
 		return fmt.Errorf("%w: %d prize units exceed %d tickets", ErrInfeasible, len(units), totalTickets)
 	}
+	// QUOTA: exactly one quota per unit reference, and its counts must add up to
+	// the units of that reference.
+	perRef := map[string]int{}
+	for _, u := range units {
+		perRef[u]++
+	}
+	for ref, n := range perRef {
+		q, matches := quotaFor(ref, rules)
+		if matches > 1 {
+			return fmt.Errorf("%w: %q matches %d QUOTA rules; at most one is allowed", ErrInfeasible, ref, matches)
+		}
+		if q == nil {
+			continue
+		}
+		sum := 0
+		for _, c := range q.Counts {
+			sum += c
+		}
+		if sum != n {
+			return fmt.Errorf("%w: QUOTA for %q places %d units but %d are issued", ErrInfeasible, ref, sum, n)
+		}
+	}
 	groups := buildGroups(totalTickets, units, rules)
 	for i, g := range groups {
 		if g.size == 0 {
+			if g.segment >= 0 {
+				return fmt.Errorf("%w: %q has no allowed positions in bracket %d", ErrInfeasible, g.ref, g.segment+1)
+			}
 			return fmt.Errorf("%w: %q has no allowed positions", ErrInfeasible, g.ref)
 		}
 		consumed := 0
@@ -399,8 +545,12 @@ func CheckFeasibility(totalTickets int, units []string, rules InstantRules) erro
 			}
 		}
 		if g.size-consumed < g.count {
-			return fmt.Errorf("%w: %q needs %d positions but only %d can be guaranteed free in its window",
-				ErrInfeasible, g.ref, g.count, g.size-consumed)
+			where := "in its window"
+			if g.segment >= 0 {
+				where = fmt.Sprintf("in bracket %d", g.segment+1)
+			}
+			return fmt.Errorf("%w: %q needs %d positions but only %d can be guaranteed free %s",
+				ErrInfeasible, g.ref, g.count, g.size-consumed, where)
 		}
 	}
 	for _, pr := range rules.Rules {
@@ -493,6 +643,16 @@ func CheckRules(totalTickets int, placement map[int]string, rules InstantRules) 
 			for i := 1; i < len(pos); i++ {
 				if pos[i]-pos[i-1] < pr.Gap {
 					return fmt.Errorf("MIN_GAP violated: positions %d and %d closer than %d", pos[i-1], pos[i], pr.Gap)
+				}
+			}
+		case RuleQuota:
+			got := make([]int, pr.Segments)
+			for _, p := range pos {
+				got[QuotaSegmentOf(totalTickets, pr.Segments, p)]++
+			}
+			for k := range got {
+				if got[k] != pr.Counts[k] {
+					return fmt.Errorf("QUOTA violated: bracket %d holds %d units, quota is %d", k+1, got[k], pr.Counts[k])
 				}
 			}
 		case RuleDensity:

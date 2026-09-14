@@ -219,6 +219,7 @@ async function renderBundle(b, idx) {
       if (x.type === "WINDOW" || x.type === "EXCLUDE") return `${x.type} ${sel}: ${Math.round(x.minFraction*100)}%–${Math.round(x.maxFraction*100)}% of sale`;
       if (x.type === "MIN_GAP") return `MIN_GAP ${sel}: ≥ ${x.gap} positions apart`;
       if (x.type === "DENSITY") return `DENSITY ${sel}: ≤ ${x.maxUnits} per ${Math.round(x.segmentFraction*100)}% segment`;
+      if (x.type === "QUOTA") return `QUOTA ${sel}: ${(x.counts||[]).join("/")} units across ${x.segments} equal brackets of the sale`;
       return x.type; }).join("; ") || "no rules (unconstrained)"; } catch(e) { rulesTxt = "(unparseable)"; }
     committed += kvRow("placement rules", rulesTxt);
   }
