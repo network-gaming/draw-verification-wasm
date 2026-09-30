@@ -2,6 +2,7 @@ package drawproof
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -373,41 +374,15 @@ func QuotaFromPlacement(totalTickets int, placement map[int]string, segments int
 	return rules
 }
 
-// allowedSet computes the positions (1-based, index 0 unused) a unit may occupy
-// after applying every WINDOW and EXCLUDE rule that matches it.
-func allowedSet(totalTickets int, ref string, rules InstantRules) []bool {
-	allowed := make([]bool, totalTickets+1)
-	for p := 1; p <= totalTickets; p++ {
-		allowed[p] = true
-	}
-	for _, pr := range rules.Rules {
-		if !pr.Matches(ref) {
-			continue
-		}
-		switch pr.Type {
-		case RuleWindow:
-			lo, hi := WindowPositions(totalTickets, pr.MinFraction, pr.MaxFraction)
-			for p := 1; p <= totalTickets; p++ {
-				if p < lo || p > hi {
-					allowed[p] = false
-				}
-			}
-		case RuleExclude:
-			lo, hi := WindowPositions(totalTickets, pr.MinFraction, pr.MaxFraction)
-			for p := lo; p <= hi; p++ {
-				allowed[p] = false
-			}
-		}
-	}
-	return allowed
-}
+// The allowed set of a unit is kept as intervals (spans.go); allowedSpans is
+// the interval form of the former allowedSet.
 
 type unitGroup struct {
 	ref     string
 	count   int
-	allowed []bool
-	size    int // number of allowed positions
-	segment int // QUOTA sub-group bracket (0-based), -1 otherwise
+	allowed spans // positions the group may occupy, sorted and disjoint
+	size    int   // number of allowed positions
+	segment int   // QUOTA sub-group bracket (0-based), -1 otherwise
 }
 
 // quotaFor returns the single QUOTA rule matching a unit reference, or nil.
@@ -443,15 +418,11 @@ func buildGroups(totalTickets int, units []string, rules InstantRules) []*unitGr
 	for _, ref := range order {
 		g := byRef[ref]
 		g.segment = -1
-		base := allowedSet(totalTickets, ref, rules)
+		base := allowedSpans(totalTickets, ref, rules)
 		q, _ := quotaFor(ref, rules)
 		if q == nil {
 			g.allowed = base
-			for p := 1; p <= totalTickets; p++ {
-				if g.allowed[p] {
-					g.size++
-				}
-			}
+			g.size = base.size()
 			groups = append(groups, g)
 			continue
 		}
@@ -462,13 +433,8 @@ func buildGroups(totalTickets int, units []string, rules InstantRules) []*unitGr
 				continue
 			}
 			lo, hi := QuotaSegmentBounds(totalTickets, q.Segments, k)
-			sg := &unitGroup{ref: ref, count: q.Counts[k], segment: k, allowed: make([]bool, totalTickets+1)}
-			for p := lo; p <= hi; p++ {
-				if base[p] {
-					sg.allowed[p] = true
-					sg.size++
-				}
-			}
+			sg := &unitGroup{ref: ref, count: q.Counts[k], segment: k, allowed: base.intersect(lo, hi)}
+			sg.size = sg.allowed.size()
 			groups = append(groups, sg)
 		}
 	}
@@ -532,12 +498,7 @@ func CheckFeasibility(totalTickets int, units []string, rules InstantRules) erro
 		}
 		consumed := 0
 		for _, e := range groups[:i] {
-			overlap := 0
-			for p := 1; p <= totalTickets; p++ {
-				if g.allowed[p] && e.allowed[p] {
-					overlap++
-				}
-			}
+			overlap := g.allowed.overlap(e.allowed)
 			if overlap < e.count {
 				consumed += overlap
 			} else {
@@ -590,23 +551,39 @@ func (r InstantRules) hasRejectionRules() bool {
 }
 
 // placeOnce performs one direct placement pass using the given DRBG.
+//
+// It is, draw for draw, the partial Fisher–Yates over the ascending list of
+// free positions that v0.3.0 materialised per group; the list is now virtual.
+// Element i of the list is the i-th free position of the group's allowed set
+// as it stood when the group started (rankSet.kthFree), unless a swap has put
+// another element there (swapped). Positions taken by this group are marked
+// after its pass, since its own list was fixed at the start.
 func placeOnce(totalTickets int, groups []*unitGroup, d *drbg) map[int]string {
-	taken := make([]bool, totalTickets+1)
+	taken := newRankSet(totalTickets)
 	out := make(map[int]string)
 	for _, g := range groups {
-		free := make([]int, 0, g.size)
-		for p := 1; p <= totalTickets; p++ {
-			if g.allowed[p] && !taken[p] {
-				free = append(free, p)
-			}
+		free := 0
+		for _, x := range g.allowed {
+			free += taken.freeIn(x.lo, x.hi)
 		}
-		// Partial Fisher–Yates over the free positions, ascending order as the
-		// canonical starting arrangement.
-		for i := 0; i < g.count && i < len(free); i++ {
-			j := i + d.intn(len(free)-i)
-			free[i], free[j] = free[j], free[i]
-			out[free[i]] = g.ref
-			taken[free[i]] = true
+		swapped := make(map[int]int, g.count*2)
+		at := func(idx int) int {
+			if v, ok := swapped[idx]; ok {
+				return v
+			}
+			p, _ := taken.kthFree(g.allowed, idx)
+			return p
+		}
+		picked := make([]int, 0, g.count)
+		for i := 0; i < g.count && i < free; i++ {
+			j := i + d.intn(free-i)
+			vi, vj := at(i), at(j)
+			swapped[i], swapped[j] = vj, vi
+			out[vj] = g.ref
+			picked = append(picked, vj)
+		}
+		for _, p := range picked {
+			taken.take(p)
 		}
 	}
 	return out
@@ -784,11 +761,17 @@ func DisplayPermutation(totalTickets int, seed []byte) []int {
 	return perm
 }
 
-// DigestPermutation returns the canonical ordered digest of a permutation.
+// DigestPermutation returns the canonical ordered digest of a permutation:
+// the same bytes as DigestStringsOrdered over the decimal strings, framed the
+// same way, without building the strings (ten million of them at a large
+// mint).
 func DigestPermutation(perm []int) string {
-	items := make([]string, len(perm))
-	for i, n := range perm {
-		items[i] = strconv.Itoa(n)
+	h := sha256.New()
+	var buf [32]byte
+	for _, n := range perm {
+		s := strconv.AppendInt(buf[8:8], int64(n), 10)
+		binary.BigEndian.PutUint64(buf[:8], uint64(len(s)))
+		_, _ = h.Write(buf[:8+len(s)])
 	}
-	return DigestStringsOrdered(items)
+	return hex.EncodeToString(h.Sum(nil))
 }
