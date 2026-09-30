@@ -77,27 +77,52 @@
   </details>
 
   <div class="card">
-    <label>Proof bundle JSON (a single bundle, or an array)</label>
-    <textarea id="bundleText" placeholder='{"kind":"MAIN_DRAW","pool":[...],"commit":{...},"reveal":{...}}'></textarea>
+    <label>Proof bundle (a saved file, or paste the JSON)</label>
+    <div style="margin:6px 0 10px;"><input type="file" id="bundleFile" accept=".json,application/json" /></div>
+    <textarea id="bundleText" placeholder='{"kind":"MAIN_DRAW","poolFile":"...","commit":{...},"reveal":{...}}'></textarea>
+    <label style="margin-top:12px;">Pool file (optional: the entries of a large main draw, one per line, as published next to the bundle)</label>
+    <div style="margin:6px 0 10px;"><input type="file" id="poolFile" accept=".txt,.gz,text/plain,application/gzip" /></div>
     <div style="margin-top:10px;"><button id="verifyPaste">Verify bundle</button></div>
-    <p class="status" id="statusPaste">Paste the response of the platform's public proof feed
+    <p class="status" id="statusPaste">Use the platform's public proof feed
       (<code>GET &lt;platform&gt;/v2/raffles/rounds/&lt;id&gt;/verification</code> or
-      <code>/v2/raffles/draws/&lt;id&gt;/verification</code>), or a saved bundle.</p>
+      <code>/v2/raffles/draws/&lt;id&gt;/verification</code>), or a saved bundle. A bundle whose pool is published
+      as a file names it in <code>poolFile</code>; it is fetched from the same platform, or choose the saved file
+      above. Verification runs in a background worker, so a very large pool does not freeze this page.</p>
   </div>
 
   <div id="output"></div>
 </div>
 
-<script src="wasm_exec.js"></script>
 <script>
 const DRAND_DEFAULT = "https://api.drand.sh";
 
-let wasmReady = (async () => {
-  const go = new Go();
-  const buf = await fetch("drawverify.wasm").then(r => r.arrayBuffer());
-  const { instance } = await WebAssembly.instantiate(buf, go.importObject);
-  go.run(instance); // registers global drawverify()
-})();
+// The verifier runs in a Web Worker (verify-worker.js): the WASM sorts and
+// hashes the pool there, and this page only renders results.
+const worker = new Worker("verify-worker.js");
+const pending = new Map();
+let nextId = 1;
+worker.onmessage = (ev) => {
+  const m = ev.data, p = pending.get(m.id);
+  if (!p) return;
+  if (m.type === "progress") { p.onProgress && p.onProgress(m.loaded); return; }
+  pending.delete(m.id);
+  if (m.type === "error") p.reject(new Error(m.error)); else p.resolve(m);
+};
+// Where a bundle's pool file lives: the bundle's origin, or the platform the
+// bundle was fetched from, recorded when the JSON is loaded from a URL.
+let bundleOrigin = "";
+function poolUrlFor(b) {
+  if (!b.poolFile) return "";
+  try { return new URL(b.poolFile, bundleOrigin || location.href).toString(); } catch { return b.poolFile; }
+}
+function verifyInWorker(bundle, onProgress) {
+  const id = nextId++;
+  const poolFile = document.getElementById("poolFile").files[0] || null;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject, onProgress });
+    worker.postMessage({ type: "verify", id, bundle, poolUrl: poolFile ? "" : poolUrlFor(bundle), poolFile });
+  });
+}
 
 // ---- helpers ----
 function esc(s){ return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
@@ -192,9 +217,12 @@ async function checkWork(name, b) {
 
 // ---- main bundle renderer ----
 async function renderBundle(b, idx) {
-  let res;
-  try { res = JSON.parse(drawverify(JSON.stringify(b))); }
-  catch (e) { return errorCard(`Bundle #${idx+1}`, "verifier not loaded: " + e.message); }
+  let res, poolInfo = null;
+  const status = document.getElementById("statusPaste");
+  try {
+    const m = await verifyInWorker(b, (loaded) => { status.textContent = `Reading pool file… ${(loaded/1048576).toFixed(1)} MB`; });
+    res = m.result; poolInfo = m.poolInfo;
+  } catch (e) { return errorCard(`Bundle #${idx+1}`, "verifier error: " + e.message); }
 
   const div = document.createElement("div");
   div.className = "result";
@@ -229,7 +257,8 @@ async function renderBundle(b, idx) {
   let revealed = `<div class="kv">`;
   revealed += kvRow("local seed", r.localSeed, "in");
   if (r.beaconValue) revealed += kvRow("beacon value", r.beaconValue, "in");
-  if (b.pool) revealed += kvRow(`pool (${poolN} entries)`, (b.pool.slice(0,8).join(", ") + (poolN>8?` … +${poolN-8} more`:"")), "in");
+  if (b.pool && b.pool.length) revealed += kvRow(`pool (${poolN} entries)`, (b.pool.slice(0,8).join(", ") + (poolN>8?` … +${poolN-8} more`:"")), "in");
+  else if (b.poolFile) revealed += kvRow(`pool file (${b.poolCount||"?"} entries)`, `${b.poolFile}${poolInfo?` — read ${poolInfo.count} entries, digest ${poolInfo.digest.slice(0,12)}…`:""}`, "in");
   if (b.allocation) revealed += kvRow(`allocation (${allocN})${c.algorithmVersion?" by sale position":""}`, Object.entries(b.allocation).slice(0,4).map(([k,v])=>`${k}→${v}`).join("  ") + (allocN>4?` …`:""), "in");
   if (r.attempts) revealed += kvRow("placement attempts", r.attempts, "out");
   if (b.ticketNumbers) revealed += kvRow(`ticket numbers (${b.ticketNumbers.length})`, b.ticketNumbers.slice(0,10).join(", ") + (b.ticketNumbers.length>10?" …":""), "out");
@@ -273,14 +302,29 @@ async function renderAll(bundles) {
 }
 
 async function verifyPaste() {
-  const status = document.getElementById("statusPaste"); await wasmReady;
+  const status = document.getElementById("statusPaste");
+  let text = document.getElementById("bundleText").value;
+  const file = document.getElementById("bundleFile").files[0];
+  if (file) { text = await file.text(); bundleOrigin = ""; }
   let parsed;
-  try { parsed = JSON.parse(document.getElementById("bundleText").value); }
+  try { parsed = JSON.parse(text); }
   catch (e) { status.textContent = "Invalid JSON: " + e.message; return; }
   const bundles = Array.isArray(parsed) ? parsed : (parsed.data && Array.isArray(parsed.data) ? parsed.data : [parsed]);
   status.textContent = `Verifying ${bundles.length} bundle(s)…`;
   await renderAll(bundles);
+  status.textContent = `Verified ${bundles.length} bundle(s).`;
 }
+
+// ?bundle=<url> loads the proof feed directly, so the platform can link here.
+(async () => {
+  const u = new URLSearchParams(location.search).get("bundle");
+  if (!u) return;
+  try {
+    const resp = await fetch(u); const text = await resp.text();
+    document.getElementById("bundleText").value = text; bundleOrigin = new URL(u, location.href).toString();
+    await verifyPaste();
+  } catch (e) { document.getElementById("statusPaste").textContent = "Could not load bundle: " + e.message; }
+})();
 
 document.getElementById("verifyPaste").onclick = verifyPaste;
 </script>

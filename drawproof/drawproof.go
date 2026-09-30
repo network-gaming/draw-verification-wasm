@@ -272,3 +272,10 @@ func writeFramed(h interface{ Write([]byte) (int, error) }, s string) {
 	_, _ = h.Write(l[:])
 	_, _ = h.Write([]byte(s))
 }
+
+// framedDigest is DigestStringsOrdered built incrementally.
+type framedDigest struct{ h hash.Hash }
+
+func newFramedDigest() *framedDigest { return &framedDigest{h: sha256.New()} }
+func (d *framedDigest) add(s string) { writeFramed(d.h, s) }
+func (d *framedDigest) sum() string  { return hex.EncodeToString(d.h.Sum(nil)) }

@@ -1,6 +1,7 @@
 package drawproof
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 )
@@ -20,7 +21,21 @@ type Bundle struct {
 	// Instant Wins v2 only.
 	Rules         string `json:"rules,omitempty"`         // canonical rules JSON (digested in Commit.RulesDigest)
 	TicketNumbers []int  `json:"ticketNumbers,omitempty"` // display ticket number per sale position (index 0 = position 1); optional convenience
+
+	// Large pools are published as a separate file instead of inline in Pool:
+	// one entry per line. PoolDigest and PoolCount describe it so a verifier
+	// can check what it fetched before using it; PoolFile is where to fetch
+	// it (a URL relative to the bundle's origin, or a file name). A bundle
+	// with an empty Pool and a PoolFile is verified with VerifyMainDrawIndexed
+	// once the file is loaded (the WASM verifier does this from a stream).
+	PoolDigest string `json:"poolDigest,omitempty"`
+	PoolCount  int    `json:"poolCount,omitempty"`
+	PoolFile   string `json:"poolFile,omitempty"`
 }
+
+// ErrPoolNotLoaded is returned by VerifyBundle for a main-draw or vault bundle
+// whose pool was published as a file and has not been loaded into the bundle.
+var ErrPoolNotLoaded = errors.New("bundle pool is published as a file (poolFile) and is not loaded")
 
 // VerifyBundle dispatches a bundle to the correct verification path and returns
 // the per-check result. Instant bundles with a disclosed seed are verified by
@@ -28,6 +43,9 @@ type Bundle struct {
 func VerifyBundle(b Bundle) (VerifyResult, error) {
 	switch b.Kind {
 	case KindMainDraw, KindVault:
+		if len(b.Pool) == 0 && b.PoolFile != "" {
+			return VerifyResult{}, ErrPoolNotLoaded
+		}
 		return VerifyMainDraw(b.Pool, b.Commit, b.Reveal), nil
 	case KindInstant:
 		alloc := parseIntKeyMap(b.Allocation)
