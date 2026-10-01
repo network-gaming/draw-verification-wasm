@@ -88,7 +88,11 @@ func TestPlacementMatchesLegacy(t *testing.T) {
 		for s := 0; s < 3; s++ {
 			seed := []byte{byte(iter), byte(s), 42}
 			want := legacyPlaceOnce(M, legacyBuildGroups(M, units, rules), newDRBG(seed))
-			got := placeOnce(M, buildGroups(M, units, rules), newDRBG(seed))
+			gotP, err := placeOnce(M, buildGroups(M, CountUnits(units), rules), newDRBG(seed), make([]int32, M))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := gotP.Map()
 			if !reflect.DeepEqual(want, got) {
 				t.Fatalf("placement differs (M=%d units=%v rules=%+v seed=%v)\nlegacy %v\nnew    %v", M, units, rules, seed, want, got)
 			}
@@ -108,7 +112,7 @@ func TestGroupSizesMatchLegacy(t *testing.T) {
 		units := randomUnits(r, refs, 5)
 		rules := randomRules(r, refs, true)
 		lg := legacyBuildGroups(M, units, rules)
-		ng := buildGroups(M, units, rules)
+		ng := buildGroups(M, CountUnits(units), rules)
 		if len(lg) != len(ng) {
 			t.Fatalf("group count differs: %d vs %d", len(lg), len(ng))
 		}

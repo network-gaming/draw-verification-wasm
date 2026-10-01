@@ -88,13 +88,14 @@ func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
 		return res
 	}
 
-	// 5. Reproduce the placement.
-	units := make([]string, 0, len(allocation))
-	for _, ref := range allocation {
-		units = append(units, ref)
+	// 5. Reproduce the placement, in the compact form: the disclosed map is
+	// one entry per prize, the Placement one small integer per position.
+	disclosed, err := PlacementFromMap(totalTickets, allocation)
+	if err != nil {
+		res.add("allocation-reproduced-from-seed", false, err.Error())
+		return res
 	}
-	units = CanonicalOrder(units)
-	reproduced, attempts, err := AllocateInstantPrizesV2(totalTickets, units, rules, finalSeed)
+	reproduced, attempts, err := AllocatePlacement(totalTickets, disclosed.Counts(), rules, finalSeed)
 	if err != nil {
 		res.add("allocation-reproduced-from-seed", false, err.Error())
 	} else {
@@ -102,12 +103,12 @@ func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
 		if wantAttempts == 0 {
 			wantAttempts = 1
 		}
-		res.add("allocation-reproduced-from-seed", allocationsEqual(reproduced, allocation) && attempts == wantAttempts,
+		res.add("allocation-reproduced-from-seed", reproduced.Equal(disclosed) && attempts == wantAttempts,
 			fmt.Sprintf("%d prizes re-derived over %d positions in %d attempt(s)", len(allocation), totalTickets, attempts))
 	}
 
 	// 6. Every rule holds on the disclosed allocation.
-	if err := CheckRules(totalTickets, allocation, rules); err != nil {
+	if err := disclosed.CheckRules(rules); err != nil {
 		res.add("rules-satisfied", false, err.Error())
 	} else {
 		res.add("rules-satisfied", true, fmt.Sprintf("%d rule(s) hold for every placed prize", len(rules.Rules)))
