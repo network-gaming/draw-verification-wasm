@@ -156,7 +156,7 @@ numbers when included). Bundles without a disclosed seed get the reduced
 | `pool-digest-matches-commit` | main, vault | The entrant pool was frozen before the draw and unaltered. |
 | `winners-reproduced` | main, vault | Re-running the algorithm reproduces the exact published winners. |
 | `winner-digest-consistent` | main, vault | The winners list was not edited after recording. |
-| `allocation-digest-matches-commit` | instant | The full allocation was sealed before sales opened. |
+| `allocation-digest-matches-commit` | instant | The full allocation was sealed before sales opened. On a bundle that publishes `units` (prize reference → count) instead of `allocation`, the allocation is reproduced from the seed first and its digest compared. |
 | `allocation-reproduced-from-seed` | instant | The entire ticket→prize allocation re-derives from the disclosed seed. |
 
 For full independence, the web page additionally fetches the named pulse from

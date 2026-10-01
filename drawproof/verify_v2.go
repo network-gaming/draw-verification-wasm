@@ -37,6 +37,10 @@ func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
 	res := VerifyResult{OK: true}
 	commit, reveal := b.Commit, b.Reveal
 	allocation := parseIntKeyMap(b.Allocation)
+	// A bundle may publish the allocation as unit counts instead of positions
+	// (see Bundle.Units); then the allocation is the reproduction itself and
+	// its digest is checked once it exists, in step 5.
+	fromCounts := len(allocation) == 0 && len(b.Units) > 0
 	totalTickets := commit.TotalTickets
 	if totalTickets == 0 {
 		totalTickets = reveal.TotalTickets
@@ -49,8 +53,10 @@ func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
 	rules, rulesOK := verifyRulesDigest(&res, b)
 
 	// 2. Allocation bound to the commit.
-	res.add("allocation-digest-matches-commit", DigestAllocation(allocation) == commit.InputDigest,
-		fmt.Sprintf("committed %s before sales at %s", short(commit.InputDigest), commit.CommittedAt))
+	if !fromCounts {
+		res.add("allocation-digest-matches-commit", DigestAllocation(allocation) == commit.InputDigest,
+			fmt.Sprintf("committed %s before sales at %s", short(commit.InputDigest), commit.CommittedAt))
+	}
 
 	// 3. Local seed bound to the commit.
 	local, err := hex.DecodeString(reveal.LocalSeed)
@@ -90,24 +96,48 @@ func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
 
 	// 5. Reproduce the placement, in the compact form: the disclosed map is
 	// one entry per prize, the Placement one small integer per position.
-	disclosed, err := PlacementFromMap(totalTickets, allocation)
-	if err != nil {
-		res.add("allocation-reproduced-from-seed", false, err.Error())
-		return res
-	}
-	reproduced, attempts, err := AllocatePlacement(totalTickets, disclosed.Counts(), rules, finalSeed)
-	if err != nil {
-		res.add("allocation-reproduced-from-seed", false, err.Error())
+	var (
+		disclosed *Placement
+		counts    UnitCounts
+	)
+	if fromCounts {
+		counts = UnitCounts(b.Units)
 	} else {
-		wantAttempts := reveal.Attempts
-		if wantAttempts == 0 {
-			wantAttempts = 1
+		disclosed, err = PlacementFromMap(totalTickets, allocation)
+		if err != nil {
+			res.add("allocation-reproduced-from-seed", false, err.Error())
+			return res
 		}
+		counts = disclosed.Counts()
+	}
+	wantAttempts := reveal.Attempts
+	if wantAttempts == 0 {
+		wantAttempts = 1
+	}
+	reproduced, attempts, err := AllocatePlacement(totalTickets, counts, rules, finalSeed)
+	switch {
+	case err != nil:
+		res.add("allocation-reproduced-from-seed", false, err.Error())
+		if fromCounts {
+			res.add("allocation-digest-matches-commit", false, "allocation could not be reproduced")
+		}
+	case fromCounts:
+		// Published as counts: the reproduction is the allocation, bound to
+		// the commit (and to the reveal, when it names a digest) by digest.
+		digest := reproduced.Digest()
+		res.add("allocation-digest-matches-commit", digest == commit.InputDigest,
+			fmt.Sprintf("%d prizes reproduced from %d unit count(s); committed %s before sales at %s",
+				reproduced.Len(), len(b.Units), short(commit.InputDigest), commit.CommittedAt))
+		revealOK := reveal.WinnerDigest == "" || reveal.WinnerDigest == digest
+		res.add("allocation-reproduced-from-seed", revealOK && attempts == wantAttempts,
+			fmt.Sprintf("%d prizes re-derived over %d positions in %d attempt(s)", reproduced.Len(), totalTickets, attempts))
+		disclosed = reproduced
+	default:
 		res.add("allocation-reproduced-from-seed", reproduced.Equal(disclosed) && attempts == wantAttempts,
 			fmt.Sprintf("%d prizes re-derived over %d positions in %d attempt(s)", len(allocation), totalTickets, attempts))
 	}
 
-	// 6. Every rule holds on the disclosed allocation.
+	// 6. Every rule holds on the disclosed (or, from counts, reproduced) allocation.
 	if err := disclosed.CheckRules(rules); err != nil {
 		res.add("rules-satisfied", false, err.Error())
 	} else {

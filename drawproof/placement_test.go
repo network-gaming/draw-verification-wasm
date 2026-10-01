@@ -1,6 +1,7 @@
 package drawproof
 
 import (
+	"encoding/hex"
 	"math/rand"
 	"reflect"
 	"testing"
@@ -120,4 +121,71 @@ func TestPlacementTenMillionMemory(t *testing.T) {
 		t.Fatalf("placed %d", p.Len())
 	}
 	_ = p.Digest()
+}
+
+// A v2 bundle that publishes unit counts instead of positions verifies by
+// reproducing the allocation and checking its digest against the commit; a
+// tampered commit digest or count fails it.
+func TestVerifyInstantV2FromUnitCounts(t *testing.T) {
+	const M = 500
+	units := UnitCounts{"pool=1;type=INSTANT_CASH;amount=5": 40, "pool=2;type=INSTANT_CASH;amount=50": 3}
+	rules := InstantRules{Version: AlgorithmVersionV2, Rules: []PositionRule{
+		{Type: RuleWindow, UnitRef: "pool=2;type=INSTANT_CASH;amount=50", MinFraction: 0.5, MaxFraction: 1},
+	}}
+	canon, rulesDigest, err := CanonicalRules(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := []byte("local-seed-for-counts-test-0001")
+	placement, attempts, err := AllocatePlacement(M, units, rules, local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	perm := DisplayPermutation(M, local)
+	bundle := Bundle{
+		Kind:  KindInstant,
+		Units: map[string]int(units),
+		Rules: canon,
+		Commit: CommitRecord{
+			Kind: KindInstant, AlgorithmVersion: AlgorithmVersionV2, TotalTickets: M,
+			InputDigest: placement.Digest(), RulesDigest: rulesDigest, DisplayDigest: DigestPermutation(perm),
+			SeedHash: HashSeed(local), CommittedAt: "2026-01-01T00:00:00Z",
+		},
+		Reveal: RevealRecord{
+			Kind: KindInstant, Seed: hex.EncodeToString(local), LocalSeed: hex.EncodeToString(local),
+			WinnerDigest: placement.Digest(), TotalTickets: M, Attempts: attempts,
+		},
+	}
+	res, err := VerifyBundle(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK {
+		t.Fatalf("bundle from unit counts failed: %+v", res.Checks)
+	}
+	for _, name := range []string{"allocation-digest-matches-commit", "allocation-reproduced-from-seed", "rules-satisfied"} {
+		found := false
+		for _, c := range res.Checks {
+			if c.Name == name {
+				found = true
+				if !c.OK {
+					t.Fatalf("check %s failed: %s", name, c.Detail)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("check %s missing", name)
+		}
+	}
+
+	bad := bundle
+	bad.Commit.InputDigest = "0000"
+	if res, _ := VerifyBundle(bad); res.OK {
+		t.Fatal("tampered commit digest verified")
+	}
+	bad = bundle
+	bad.Units = map[string]int{"pool=1;type=INSTANT_CASH;amount=5": 41, "pool=2;type=INSTANT_CASH;amount=50": 3}
+	if res, _ := VerifyBundle(bad); res.OK {
+		t.Fatal("tampered unit count verified")
+	}
 }

@@ -15,8 +15,15 @@ type Bundle struct {
 	Kind       DrawKind          `json:"kind"`
 	Pool       []string          `json:"pool,omitempty"`       // MAIN_DRAW / VAULT: frozen entry identifiers
 	Allocation map[string]string `json:"allocation,omitempty"` // INSTANT: ticketNumber (v1) or salePosition (v2) -> prize reference
-	Commit     CommitRecord      `json:"commit"`
-	Reveal     RevealRecord      `json:"reveal"`
+	// Units is the Instant Wins v2 allocation as a multiset, prize reference
+	// -> number of units, published in place of Allocation on large rounds:
+	// the verifier reproduces every position from the seed, the rules and
+	// these counts and checks the digest committed before sales, so the list
+	// of millions of positions need not travel. Either Allocation or Units is
+	// present on a v2 bundle; Allocation wins when both are.
+	Units  map[string]int `json:"units,omitempty"`
+	Commit CommitRecord   `json:"commit"`
+	Reveal RevealRecord   `json:"reveal"`
 
 	// Instant Wins v2 only.
 	Rules         string `json:"rules,omitempty"`         // canonical rules JSON (digested in Commit.RulesDigest)
