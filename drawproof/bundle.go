@@ -24,6 +24,11 @@ type Bundle struct {
 	Units  map[string]int `json:"units,omitempty"`
 	Commit CommitRecord   `json:"commit"`
 	Reveal RevealRecord   `json:"reveal"`
+	// Verify is the mint verification recorded before sales (Instant Wins v2
+	// only, optional): the platform's read-back of every minted row against
+	// the commitment. Bundles exported before it existed have none and still
+	// verify; when present it is checked against the commit.
+	Verify *VerifyRecord `json:"verify,omitempty"`
 
 	// Instant Wins v2 only.
 	Rules         string `json:"rules,omitempty"`         // canonical rules JSON (digested in Commit.RulesDigest)

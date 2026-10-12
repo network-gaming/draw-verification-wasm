@@ -17,6 +17,7 @@ func VerifyInstantV2Sealed(b Bundle) VerifyResult {
 	res.add("population-committed", b.Commit.TotalTickets > 0,
 		fmt.Sprintf("%d tickets committed before sales", b.Commit.TotalTickets))
 	res.add("seed-sealed", b.Reveal.Seed == "", "seed not yet disclosed; allocation cannot be reproduced until round close")
+	verifyMintRecord(&res, b)
 	return res
 }
 
@@ -159,7 +160,46 @@ func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
 			fmt.Sprintf("%d published ticket numbers match the seeded permutation", len(b.TicketNumbers)))
 	}
 
+	// 8. The platform's pre-sales read-back of the minted rows, when published.
+	verifyMintRecord(&res, b)
+
 	return res
+}
+
+// verifyMintRecord checks a bundle's mint verification record, when it has
+// one, against the commit: the rows that were read back before sales carried
+// the committed allocation and display digests over the committed number of
+// tickets, and the walk succeeded. A bundle without a record is not failed;
+// the record is evidence of when the rows were first checked, not of the
+// outcome, which the reproduction above establishes on its own.
+func verifyMintRecord(res *VerifyResult, b Bundle) {
+	v := b.Verify
+	if v == nil {
+		return
+	}
+	switch {
+	case v.Outcome != VerifyOutcomeVerified:
+		res.add("mint-verified-before-sales", false,
+			fmt.Sprintf("mint verification outcome %q: %s", v.Outcome, v.Error))
+	case v.Kind != b.Commit.Kind || v.RoundID != b.Commit.RoundID:
+		res.add("mint-verified-before-sales", false,
+			fmt.Sprintf("verification record is for %s round %d, bundle is %s round %d", v.Kind, v.RoundID, b.Commit.Kind, b.Commit.RoundID))
+	case v.InputDigest != b.Commit.InputDigest:
+		res.add("mint-verified-before-sales", false,
+			fmt.Sprintf("rows read back carried allocation %s, committed %s", short(v.InputDigest), short(b.Commit.InputDigest)))
+	case b.Commit.DisplayDigest != "" && v.DisplayDigest != b.Commit.DisplayDigest:
+		res.add("mint-verified-before-sales", false,
+			fmt.Sprintf("rows read back carried ticket numbers %s, committed %s", short(v.DisplayDigest), short(b.Commit.DisplayDigest)))
+	case b.Commit.TotalTickets != 0 && (v.TotalTickets != b.Commit.TotalTickets || v.PositionsWalked != b.Commit.TotalTickets):
+		res.add("mint-verified-before-sales", false,
+			fmt.Sprintf("verification walked %d of %d rows, %d committed", v.PositionsWalked, v.TotalTickets, b.Commit.TotalTickets))
+	case b.Commit.RulesDigest != "" && v.RulesDigest != "" && v.RulesDigest != b.Commit.RulesDigest:
+		res.add("mint-verified-before-sales", false,
+			fmt.Sprintf("verification saw rules %s, committed %s", short(v.RulesDigest), short(b.Commit.RulesDigest)))
+	default:
+		res.add("mint-verified-before-sales", true,
+			fmt.Sprintf("%d rows read back by %s at %s matched the commitment", v.PositionsWalked, v.Verifier, v.FinishedAt))
+	}
 }
 
 // verifyRulesDigest parses the bundle's rules, checks them against the commit,

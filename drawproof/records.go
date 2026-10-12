@@ -68,3 +68,57 @@ func CommitKey(kind DrawKind, roundID int) string {
 func RevealKey(kind DrawKind, roundID int) string {
 	return fmt.Sprintf("draw:reveal:%s:%d", kind, roundID)
 }
+
+// VerifyOutcome is the result a VerifyRecord reports.
+type VerifyOutcome string
+
+const (
+	VerifyOutcomeVerified VerifyOutcome = "VERIFIED"
+	VerifyOutcomeFailed   VerifyOutcome = "FAILED"
+)
+
+// VerifyRecord is written to the immutable ledger when the rows a platform
+// minted for an Instant Wins v2 round have been read back and compared with
+// the commitment: every sale position present once, every envelope opened and
+// matched against the placement re-derived from the sealed seed, every ticket
+// number matched against the committed display permutation. It is the record
+// that the database held the committed pattern BEFORE sales opened, so a
+// later disclosure proves the pattern was not altered during the sale rather
+// than being the first time anyone looked.
+//
+// A failed walk is recorded too, with Error set, so a round that never sold
+// still shows why.
+type VerifyRecord struct {
+	Kind               DrawKind      `json:"kind"`
+	RoundID            int           `json:"roundId"`
+	Outcome            VerifyOutcome `json:"outcome"`
+	AlgorithmVersion   int           `json:"algorithmVersion,omitempty"`
+	TotalTickets       int           `json:"totalTickets"`             // M, as configured and as committed
+	PositionsWalked    int           `json:"positionsWalked"`          // rows read back (M on success)
+	PrizePositions     int           `json:"prizePositions,omitempty"` // prize units found in the rows
+	InputDigest        string        `json:"inputDigest"`              // allocation digest rebuilt from the rows
+	RulesDigest        string        `json:"rulesDigest,omitempty"`
+	DisplayDigest      string        `json:"displayDigest,omitempty"` // ticket-number digest rebuilt from the rows
+	ChunkCount         int           `json:"chunkCount,omitempty"`    // committed mint chunks checked
+	ChunksDigest       string        `json:"chunksDigest,omitempty"`  // digest over the ordered chunk digests
+	ReproducedFromSeed bool          `json:"reproducedFromSeed"`      // rows compared with a fresh derivation from the sealed seed, not only with the digest
+	Error              string        `json:"error,omitempty"`
+	Verifier           string        `json:"verifier"` // program that walked the rows
+	LibraryVersion     string        `json:"libraryVersion,omitempty"`
+	AdminID            int           `json:"adminId,omitempty"` // 0 when queued by the round opening
+	StartedAt          string        `json:"startedAt"`         // RFC3339
+	FinishedAt         string        `json:"finishedAt"`        // RFC3339
+}
+
+// VerifyKey is the immudb key under which a mint verification is stored.
+func VerifyKey(kind DrawKind, roundID int) string {
+	return fmt.Sprintf("draw:verify:%s:%d", kind, roundID)
+}
+
+// DigestChunks folds an ordered list of mint-chunk digests (hex strings) into
+// one digest, so a round's chunk ledger can be committed and checked as a
+// single value. Each digest is framed by its length so the list cannot be
+// re-split into the same bytes.
+func DigestChunks(chunkDigests []string) string {
+	return DigestStringsOrdered(chunkDigests)
+}
