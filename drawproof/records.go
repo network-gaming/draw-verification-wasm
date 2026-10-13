@@ -38,6 +38,15 @@ type CommitRecord struct {
 	RulesDigest      string `json:"rulesDigest,omitempty"`   // SHA-256 of CanonicalRules
 	DisplayDigest    string `json:"displayDigest,omitempty"` // DigestPermutation of the display permutation
 	TotalTickets     int    `json:"totalTickets,omitempty"`  // ticket population, committed before sales
+
+	// Approved candidate (instant v2 rounds opened from a stored candidate
+	// draw). The platform generated CandidatesGenerated draws for the round
+	// and an admin approved the one numbered CandidateSeq, created at
+	// CandidateCreatedAt; its seed is the one this record commits to. Zero /
+	// absent values mean the seed was drawn at mint time.
+	CandidateSeq        int    `json:"candidateSeq,omitempty"`
+	CandidatesGenerated int    `json:"candidatesGenerated,omitempty"`
+	CandidateCreatedAt  string `json:"candidateCreatedAt,omitempty"` // RFC3339
 }
 
 // RevealRecord is written to the immutable ledger AFTER a draw, disclosing the
