@@ -2,6 +2,7 @@ package drawproof
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -373,41 +374,15 @@ func QuotaFromPlacement(totalTickets int, placement map[int]string, segments int
 	return rules
 }
 
-// allowedSet computes the positions (1-based, index 0 unused) a unit may occupy
-// after applying every WINDOW and EXCLUDE rule that matches it.
-func allowedSet(totalTickets int, ref string, rules InstantRules) []bool {
-	allowed := make([]bool, totalTickets+1)
-	for p := 1; p <= totalTickets; p++ {
-		allowed[p] = true
-	}
-	for _, pr := range rules.Rules {
-		if !pr.Matches(ref) {
-			continue
-		}
-		switch pr.Type {
-		case RuleWindow:
-			lo, hi := WindowPositions(totalTickets, pr.MinFraction, pr.MaxFraction)
-			for p := 1; p <= totalTickets; p++ {
-				if p < lo || p > hi {
-					allowed[p] = false
-				}
-			}
-		case RuleExclude:
-			lo, hi := WindowPositions(totalTickets, pr.MinFraction, pr.MaxFraction)
-			for p := lo; p <= hi; p++ {
-				allowed[p] = false
-			}
-		}
-	}
-	return allowed
-}
+// The allowed set of a unit is kept as intervals (spans.go); allowedSpans is
+// the interval form of the former allowedSet.
 
 type unitGroup struct {
 	ref     string
 	count   int
-	allowed []bool
-	size    int // number of allowed positions
-	segment int // QUOTA sub-group bracket (0-based), -1 otherwise
+	allowed spans // positions the group may occupy, sorted and disjoint
+	size    int   // number of allowed positions
+	segment int   // QUOTA sub-group bracket (0-based), -1 otherwise
 }
 
 // quotaFor returns the single QUOTA rule matching a unit reference, or nil.
@@ -427,31 +402,17 @@ func quotaFor(ref string, rules InstantRules) (*PositionRule, int) {
 
 // buildGroups groups units by reference, computes allowed sets, and orders the
 // groups most-constrained first (smallest allowed set, then by reference).
-func buildGroups(totalTickets int, units []string, rules InstantRules) []*unitGroup {
-	byRef := map[string]*unitGroup{}
-	var order []string
-	for _, u := range units {
-		g, ok := byRef[u]
-		if !ok {
-			g = &unitGroup{ref: u}
-			byRef[u] = g
-			order = append(order, u)
-		}
-		g.count++
-	}
+func buildGroups(totalTickets int, counts UnitCounts, rules InstantRules) []*unitGroup {
+	order := counts.sortedRefs()
 	groups := make([]*unitGroup, 0, len(order))
 	for _, ref := range order {
-		g := byRef[ref]
+		g := &unitGroup{ref: ref, count: counts[ref]}
 		g.segment = -1
-		base := allowedSet(totalTickets, ref, rules)
+		base := allowedSpans(totalTickets, ref, rules)
 		q, _ := quotaFor(ref, rules)
 		if q == nil {
 			g.allowed = base
-			for p := 1; p <= totalTickets; p++ {
-				if g.allowed[p] {
-					g.size++
-				}
-			}
+			g.size = base.size()
 			groups = append(groups, g)
 			continue
 		}
@@ -462,13 +423,8 @@ func buildGroups(totalTickets int, units []string, rules InstantRules) []*unitGr
 				continue
 			}
 			lo, hi := QuotaSegmentBounds(totalTickets, q.Segments, k)
-			sg := &unitGroup{ref: ref, count: q.Counts[k], segment: k, allowed: make([]bool, totalTickets+1)}
-			for p := lo; p <= hi; p++ {
-				if base[p] {
-					sg.allowed[p] = true
-					sg.size++
-				}
-			}
+			sg := &unitGroup{ref: ref, count: q.Counts[k], segment: k, allowed: base.intersect(lo, hi)}
+			sg.size = sg.allowed.size()
 			groups = append(groups, sg)
 		}
 	}
@@ -491,22 +447,24 @@ func buildGroups(totalTickets int, units []string, rules InstantRules) []*unitGr
 // the trivial counting bounds only; a rule set that passes here can still
 // exhaust MaxAttempts if it is very tight.
 func CheckFeasibility(totalTickets int, units []string, rules InstantRules) error {
+	return CheckFeasibilityCounts(totalTickets, CountUnits(units), rules)
+}
+
+// CheckFeasibilityCounts is CheckFeasibility over a unit multiset.
+func CheckFeasibilityCounts(totalTickets int, units UnitCounts, rules InstantRules) error {
 	if err := rules.Validate(); err != nil {
 		return err
 	}
 	if totalTickets <= 0 {
 		return fmt.Errorf("%w: totalTickets must be > 0", ErrInfeasible)
 	}
-	if len(units) > totalTickets {
-		return fmt.Errorf("%w: %d prize units exceed %d tickets", ErrInfeasible, len(units), totalTickets)
+	if n := units.Total(); n > totalTickets {
+		return fmt.Errorf("%w: %d prize units exceed %d tickets", ErrInfeasible, n, totalTickets)
 	}
 	// QUOTA: exactly one quota per unit reference, and its counts must add up to
 	// the units of that reference.
-	perRef := map[string]int{}
-	for _, u := range units {
-		perRef[u]++
-	}
-	for ref, n := range perRef {
+	for _, ref := range units.sortedRefs() {
+		n := units[ref]
 		q, matches := quotaFor(ref, rules)
 		if matches > 1 {
 			return fmt.Errorf("%w: %q matches %d QUOTA rules; at most one is allowed", ErrInfeasible, ref, matches)
@@ -532,12 +490,7 @@ func CheckFeasibility(totalTickets int, units []string, rules InstantRules) erro
 		}
 		consumed := 0
 		for _, e := range groups[:i] {
-			overlap := 0
-			for p := 1; p <= totalTickets; p++ {
-				if g.allowed[p] && e.allowed[p] {
-					overlap++
-				}
-			}
+			overlap := g.allowed.overlap(e.allowed)
 			if overlap < e.count {
 				consumed += overlap
 			} else {
@@ -590,33 +543,64 @@ func (r InstantRules) hasRejectionRules() bool {
 }
 
 // placeOnce performs one direct placement pass using the given DRBG.
-func placeOnce(totalTickets int, groups []*unitGroup, d *drbg) map[int]string {
-	taken := make([]bool, totalTickets+1)
-	out := make(map[int]string)
+//
+// It is, draw for draw, the partial Fisher–Yates over the ascending list of
+// free positions that v0.3.0 materialised per group; the list is now virtual.
+// Element i of the list is the i-th free position of the group's allowed set
+// as it stood when the group started (rankSet.kthFree), unless a swap has put
+// another element there (swapped). Positions taken by this group are marked
+// after its pass, since its own list was fixed at the start.
+//
+// scratch is the swap table, at least totalTickets long; it is reused across
+// groups and attempts. Entry i is the position now at index i of the virtual
+// list, 0 when never swapped (positions start at 1). As a map it grew to twice
+// a group's size in entries, hundreds of megabytes for a pool of millions.
+func placeOnce(totalTickets int, groups []*unitGroup, d *drbg, scratch []int32) (*Placement, error) {
+	taken := newRankSet(totalTickets)
+	out := NewPlacement(totalTickets)
 	for _, g := range groups {
-		free := make([]int, 0, g.size)
-		for p := 1; p <= totalTickets; p++ {
-			if g.allowed[p] && !taken[p] {
-				free = append(free, p)
-			}
+		ref, err := out.refIndex(g.ref)
+		if err != nil {
+			return nil, err
 		}
-		// Partial Fisher–Yates over the free positions, ascending order as the
-		// canonical starting arrangement.
-		for i := 0; i < g.count && i < len(free); i++ {
-			j := i + d.intn(len(free)-i)
-			free[i], free[j] = free[j], free[i]
-			out[free[i]] = g.ref
-			taken[free[i]] = true
+		free := 0
+		for _, x := range g.allowed {
+			free += taken.freeIn(x.lo, x.hi)
+		}
+		swapped := scratch[:free]
+		for i := range swapped {
+			swapped[i] = 0
+		}
+		at := func(idx int) int {
+			if v := swapped[idx]; v != 0 {
+				return int(v)
+			}
+			p, _ := taken.kthFree(g.allowed, idx)
+			return p
+		}
+		n := g.count
+		if free < n {
+			n = free
+		}
+		picked := make([]int32, 0, n)
+		for i := 0; i < n; i++ {
+			j := i + d.intn(free-i)
+			vi, vj := at(i), at(j)
+			swapped[i], swapped[j] = int32(vj), int32(vi)
+			out.set(vj, ref)
+			picked = append(picked, int32(vj))
+		}
+		for _, p := range picked {
+			taken.take(int(p))
 		}
 	}
-	return out
+	return out, nil
 }
 
 // CheckRules reports whether a placement satisfies every rule (all four types),
 // returning the first violation as a descriptive error.
 func CheckRules(totalTickets int, placement map[int]string, rules InstantRules) error {
-	for _, pr := range rules.Rules {
-		// Collect matching positions in ascending order.
+	matching := func(pr *PositionRule) []int {
 		var pos []int
 		for p, ref := range placement {
 			if pr.Matches(ref) {
@@ -624,19 +608,32 @@ func CheckRules(totalTickets int, placement map[int]string, rules InstantRules) 
 			}
 		}
 		sort.Ints(pos)
+		return pos
+	}
+	refAt := func(p int) string { return placement[p] }
+	return checkRulesOn(totalTickets, rules, matching, refAt)
+}
+
+// checkRulesOn is CheckRules over any placement representation: matching
+// returns the positions holding a unit the rule matches, ascending, and refAt
+// the reference at a position (for messages).
+func checkRulesOn(totalTickets int, rules InstantRules, matching func(*PositionRule) []int, refAt func(int) string) error {
+	for i := range rules.Rules {
+		pr := &rules.Rules[i]
+		pos := matching(pr)
 		switch pr.Type {
 		case RuleWindow:
 			lo, hi := WindowPositions(totalTickets, pr.MinFraction, pr.MaxFraction)
 			for _, p := range pos {
 				if p < lo || p > hi {
-					return fmt.Errorf("WINDOW violated: %s at position %d outside [%d,%d]", placement[p], p, lo, hi)
+					return fmt.Errorf("WINDOW violated: %s at position %d outside [%d,%d]", refAt(p), p, lo, hi)
 				}
 			}
 		case RuleExclude:
 			lo, hi := WindowPositions(totalTickets, pr.MinFraction, pr.MaxFraction)
 			for _, p := range pos {
 				if p >= lo && p <= hi {
-					return fmt.Errorf("EXCLUDE violated: %s at position %d inside [%d,%d]", placement[p], p, lo, hi)
+					return fmt.Errorf("EXCLUDE violated: %s at position %d inside [%d,%d]", refAt(p), p, lo, hi)
 				}
 			}
 		case RuleMinGap:
@@ -682,22 +679,38 @@ func CheckRules(totalTickets int, placement map[int]string, rules InstantRules) 
 // they hold or MaxAttempts is reached; a verifier replays exactly that many
 // attempts.
 func AllocateInstantPrizesV2(totalTickets int, units []string, rules InstantRules, seed []byte) (map[int]string, int, error) {
-	if err := CheckFeasibility(totalTickets, units, rules); err != nil {
+	p, attempts, err := AllocatePlacement(totalTickets, CountUnits(units), rules, seed)
+	if err != nil {
+		return nil, attempts, err
+	}
+	return p.Map(), attempts, nil
+}
+
+// AllocatePlacement is AllocateInstantPrizesV2 over a unit multiset, returning
+// the compact Placement. It is the same pure function of (totalTickets, units,
+// rules, seed): the draw sequence and the result are identical to the map
+// form, only the representation differs.
+func AllocatePlacement(totalTickets int, units UnitCounts, rules InstantRules, seed []byte) (*Placement, int, error) {
+	if err := CheckFeasibilityCounts(totalTickets, units, rules); err != nil {
 		return nil, 0, err
 	}
-	if len(units) == 0 {
-		return map[int]string{}, 1, nil
+	if units.Total() == 0 {
+		return NewPlacement(totalTickets), 1, nil
 	}
 	groups := buildGroups(totalTickets, units, rules)
 	d := newDRBG(seed)
 	maxAttempts := rules.effectiveMaxAttempts()
 	reject := rules.hasRejectionRules()
+	scratch := make([]int32, totalTickets)
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		placement := placeOnce(totalTickets, groups, d)
+		placement, err := placeOnce(totalTickets, groups, d, scratch)
+		if err != nil {
+			return nil, attempt, err
+		}
 		if !reject {
 			return placement, attempt, nil
 		}
-		if err := CheckRules(totalTickets, placement, rules); err == nil {
+		if err := placement.CheckRules(rules); err == nil {
 			return placement, attempt, nil
 		}
 	}
@@ -708,18 +721,28 @@ func AllocateInstantPrizesV2(totalTickets int, units []string, rules InstantRule
 // crypto/rand seed so an operator can see what a rule set produces without any
 // outcome being decided. The seed is never returned.
 func PreviewInstantPrizes(totalTickets int, units []string, rules InstantRules) (map[int]string, PreviewStats, error) {
+	p, stats, err := PreviewPlacement(totalTickets, CountUnits(units), rules)
+	if err != nil {
+		return nil, PreviewStats{}, err
+	}
+	return p.Map(), stats, nil
+}
+
+// PreviewPlacement is PreviewInstantPrizes over a unit multiset, returning
+// the compact Placement.
+func PreviewPlacement(totalTickets int, units UnitCounts, rules InstantRules) (*Placement, PreviewStats, error) {
 	seed, err := GenerateSeed()
 	if err != nil {
 		return nil, PreviewStats{}, err
 	}
-	placement, attempts, err := AllocateInstantPrizesV2(totalTickets, units, rules, seed)
+	placement, attempts, err := AllocatePlacement(totalTickets, units, rules, seed)
 	for i := range seed {
 		seed[i] = 0
 	}
 	if err != nil {
 		return nil, PreviewStats{}, err
 	}
-	return placement, SummarisePlacement(totalTickets, placement, attempts), nil
+	return placement, placement.Summarise(attempts), nil
 }
 
 // SummarisePlacement computes PreviewStats for a placement.
@@ -784,11 +807,17 @@ func DisplayPermutation(totalTickets int, seed []byte) []int {
 	return perm
 }
 
-// DigestPermutation returns the canonical ordered digest of a permutation.
+// DigestPermutation returns the canonical ordered digest of a permutation:
+// the same bytes as DigestStringsOrdered over the decimal strings, framed the
+// same way, without building the strings (ten million of them at a large
+// mint).
 func DigestPermutation(perm []int) string {
-	items := make([]string, len(perm))
-	for i, n := range perm {
-		items[i] = strconv.Itoa(n)
+	h := sha256.New()
+	var buf [32]byte
+	for _, n := range perm {
+		s := strconv.AppendInt(buf[8:8], int64(n), 10)
+		binary.BigEndian.PutUint64(buf[:8], uint64(len(s)))
+		_, _ = h.Write(buf[:8+len(s)])
 	}
-	return DigestStringsOrdered(items)
+	return hex.EncodeToString(h.Sum(nil))
 }

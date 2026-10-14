@@ -1,6 +1,7 @@
 package drawproof
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"time"
@@ -39,6 +40,17 @@ func (r *VerifyResult) add(name string, ok bool, detail string) {
 // platform could not have known the beacon value when committing. The result OK
 // is true only if every check passes.
 func VerifyMainDraw(pool []string, commit CommitRecord, reveal RevealRecord) VerifyResult {
+	sorted := CanonicalOrder(pool)
+	return VerifyMainDrawIndexed(len(sorted), func(i int) string { return sorted[i] }, commit, reveal)
+}
+
+// VerifyMainDrawIndexed is VerifyMainDraw over a pool that is not held as a
+// []string: at(i) returns the i-th entry of the pool in canonical (byte-wise
+// ascending) order, for i in [0, n). The digest is computed as a stream and
+// the winners are resolved by rank (SelectWinnerRanks), so a ten-million-entry
+// pool costs the caller only its compact representation. The caller must
+// supply the entries sorted; an unsorted pool fails the digest check.
+func VerifyMainDrawIndexed(n int, at func(i int) string, commit CommitRecord, reveal RevealRecord) VerifyResult {
 	res := VerifyResult{OK: true}
 
 	finalSeed, err := hex.DecodeString(reveal.Seed)
@@ -88,16 +100,34 @@ func VerifyMainDraw(pool []string, commit CommitRecord, reveal RevealRecord) Ver
 			"no external beacon disclosed (platform-trusted local seed)")
 	}
 
-	// 3. The published pool matches the digest committed before the draw.
-	res.add("pool-digest-matches-commit", DigestStringsSorted(pool) == commit.InputDigest,
-		fmt.Sprintf("committed %s", short(commit.InputDigest)))
+	// 3. The published pool matches the digest committed before the draw. The
+	//    digest is DigestStringsSorted computed as a stream over the sorted
+	//    entries: an out-of-order entry is reported as such.
+	h := sha256.New()
+	sorted := true
+	prev := ""
+	for i := 0; i < n; i++ {
+		s := at(i)
+		if i > 0 && s < prev {
+			sorted = false
+		}
+		writeFramed(h, s)
+		prev = s
+	}
+	poolDigest := hex.EncodeToString(h.Sum(nil))
+	if !sorted {
+		res.add("pool-digest-matches-commit", false, "pool entries are not in canonical (byte-wise) order")
+	} else {
+		res.add("pool-digest-matches-commit", poolDigest == commit.InputDigest,
+			fmt.Sprintf("committed %s", short(commit.InputDigest)))
+	}
 
-	// 4. Reproduce the winners deterministically and compare. The pool is ordered
-	//    canonically first, so reproduction is independent of publication order.
-	reproduced := SelectWinners(CanonicalOrder(pool), len(reveal.Winners), finalSeed)
-	match := len(reproduced) == len(reveal.Winners)
-	for i := 0; match && i < len(reproduced); i++ {
-		if reproduced[i] != reveal.Winners[i] {
+	// 4. Reproduce the winners deterministically and compare: the winners are
+	//    the entries at the ranks the seed selects from the canonical pool.
+	ranks := SelectWinnerRanks(n, len(reveal.Winners), finalSeed)
+	match := sorted && len(ranks) == len(reveal.Winners)
+	for i := 0; match && i < len(ranks); i++ {
+		if at(ranks[i]) != reveal.Winners[i] {
 			match = false
 		}
 	}

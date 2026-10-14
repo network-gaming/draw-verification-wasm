@@ -24,6 +24,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"hash"
 	"sort"
 	"strconv"
 )
@@ -39,6 +40,8 @@ type drbg struct {
 	counter uint64
 	buf     [sha256.Size]byte
 	bufLen  int // number of valid bytes remaining at the tail of buf
+	mac     hash.Hash
+	sum     [sha256.Size]byte
 }
 
 func newDRBG(seed []byte) *drbg {
@@ -47,14 +50,20 @@ func newDRBG(seed []byte) *drbg {
 	return &drbg{seed: key[:]}
 }
 
-// refill computes the next keystream block.
+// refill computes the next keystream block. One HMAC is kept and reset
+// between blocks: a ten-million-position permutation refills 2.5 million
+// times, and constructing the HMAC each time was most of its allocation.
 func (d *drbg) refill() {
-	mac := hmac.New(sha256.New, d.seed)
+	if d.mac == nil {
+		d.mac = hmac.New(sha256.New, d.seed)
+	} else {
+		d.mac.Reset()
+	}
 	var ctr [8]byte
 	binary.BigEndian.PutUint64(ctr[:], d.counter)
 	d.counter++
-	mac.Write(ctr[:])
-	sum := mac.Sum(nil)
+	d.mac.Write(ctr[:])
+	sum := d.mac.Sum(d.sum[:0])
 	copy(d.buf[:], sum)
 	d.bufLen = sha256.Size
 }
@@ -152,6 +161,37 @@ func SelectWinners(pool []string, count int, seed []byte) []string {
 	return winners
 }
 
+// SelectWinnerRanks is SelectWinners without the pool: it returns the 0-based
+// indexes into the canonically ordered pool of the entries SelectWinners would
+// return, in the same order, for the same n, count and seed. A platform that
+// keeps the sorted pool outside memory (a database cursor, a compact array of
+// ticket numbers) resolves winners by index instead of loading and shuffling
+// n strings. The virtual array holds only the swapped entries.
+func SelectWinnerRanks(n, count int, seed []byte) []int {
+	if n <= 0 || count <= 0 {
+		return nil
+	}
+	if count > n {
+		count = n
+	}
+	d := newDRBG(seed)
+	swapped := make(map[int]int, count*2)
+	at := func(i int) int {
+		if v, ok := swapped[i]; ok {
+			return v
+		}
+		return i
+	}
+	ranks := make([]int, 0, count)
+	for i := 0; i < count; i++ {
+		j := i + d.intn(n-i)
+		vi, vj := at(i), at(j)
+		swapped[i], swapped[j] = vj, vi
+		ranks = append(ranks, vj)
+	}
+	return ranks
+}
+
 // AllocateInstantPrizes deterministically assigns each prize unit to a distinct
 // ticket number in [1, totalTickets], as a pure function of (totalTickets,
 // units, seed). units is an ordered list of prize-unit identifiers (one entry
@@ -232,3 +272,10 @@ func writeFramed(h interface{ Write([]byte) (int, error) }, s string) {
 	_, _ = h.Write(l[:])
 	_, _ = h.Write([]byte(s))
 }
+
+// framedDigest is DigestStringsOrdered built incrementally.
+type framedDigest struct{ h hash.Hash }
+
+func newFramedDigest() *framedDigest { return &framedDigest{h: sha256.New()} }
+func (d *framedDigest) add(s string) { writeFramed(d.h, s) }
+func (d *framedDigest) sum() string  { return hex.EncodeToString(d.h.Sum(nil)) }

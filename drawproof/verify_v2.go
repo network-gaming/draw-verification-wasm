@@ -17,6 +17,7 @@ func VerifyInstantV2Sealed(b Bundle) VerifyResult {
 	res.add("population-committed", b.Commit.TotalTickets > 0,
 		fmt.Sprintf("%d tickets committed before sales", b.Commit.TotalTickets))
 	res.add("seed-sealed", b.Reveal.Seed == "", "seed not yet disclosed; allocation cannot be reproduced until round close")
+	verifyMintRecord(&res, b)
 	return res
 }
 
@@ -37,6 +38,10 @@ func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
 	res := VerifyResult{OK: true}
 	commit, reveal := b.Commit, b.Reveal
 	allocation := parseIntKeyMap(b.Allocation)
+	// A bundle may publish the allocation as unit counts instead of positions
+	// (see Bundle.Units); then the allocation is the reproduction itself and
+	// its digest is checked once it exists, in step 5.
+	fromCounts := len(allocation) == 0 && len(b.Units) > 0
 	totalTickets := commit.TotalTickets
 	if totalTickets == 0 {
 		totalTickets = reveal.TotalTickets
@@ -49,8 +54,10 @@ func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
 	rules, rulesOK := verifyRulesDigest(&res, b)
 
 	// 2. Allocation bound to the commit.
-	res.add("allocation-digest-matches-commit", DigestAllocation(allocation) == commit.InputDigest,
-		fmt.Sprintf("committed %s before sales at %s", short(commit.InputDigest), commit.CommittedAt))
+	if !fromCounts {
+		res.add("allocation-digest-matches-commit", DigestAllocation(allocation) == commit.InputDigest,
+			fmt.Sprintf("committed %s before sales at %s", short(commit.InputDigest), commit.CommittedAt))
+	}
 
 	// 3. Local seed bound to the commit.
 	local, err := hex.DecodeString(reveal.LocalSeed)
@@ -88,26 +95,51 @@ func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
 		return res
 	}
 
-	// 5. Reproduce the placement.
-	units := make([]string, 0, len(allocation))
-	for _, ref := range allocation {
-		units = append(units, ref)
-	}
-	units = CanonicalOrder(units)
-	reproduced, attempts, err := AllocateInstantPrizesV2(totalTickets, units, rules, finalSeed)
-	if err != nil {
-		res.add("allocation-reproduced-from-seed", false, err.Error())
+	// 5. Reproduce the placement, in the compact form: the disclosed map is
+	// one entry per prize, the Placement one small integer per position.
+	var (
+		disclosed *Placement
+		counts    UnitCounts
+	)
+	if fromCounts {
+		counts = UnitCounts(b.Units)
 	} else {
-		wantAttempts := reveal.Attempts
-		if wantAttempts == 0 {
-			wantAttempts = 1
+		disclosed, err = PlacementFromMap(totalTickets, allocation)
+		if err != nil {
+			res.add("allocation-reproduced-from-seed", false, err.Error())
+			return res
 		}
-		res.add("allocation-reproduced-from-seed", allocationsEqual(reproduced, allocation) && attempts == wantAttempts,
+		counts = disclosed.Counts()
+	}
+	wantAttempts := reveal.Attempts
+	if wantAttempts == 0 {
+		wantAttempts = 1
+	}
+	reproduced, attempts, err := AllocatePlacement(totalTickets, counts, rules, finalSeed)
+	switch {
+	case err != nil:
+		res.add("allocation-reproduced-from-seed", false, err.Error())
+		if fromCounts {
+			res.add("allocation-digest-matches-commit", false, "allocation could not be reproduced")
+		}
+	case fromCounts:
+		// Published as counts: the reproduction is the allocation, bound to
+		// the commit (and to the reveal, when it names a digest) by digest.
+		digest := reproduced.Digest()
+		res.add("allocation-digest-matches-commit", digest == commit.InputDigest,
+			fmt.Sprintf("%d prizes reproduced from %d unit count(s); committed %s before sales at %s",
+				reproduced.Len(), len(b.Units), short(commit.InputDigest), commit.CommittedAt))
+		revealOK := reveal.WinnerDigest == "" || reveal.WinnerDigest == digest
+		res.add("allocation-reproduced-from-seed", revealOK && attempts == wantAttempts,
+			fmt.Sprintf("%d prizes re-derived over %d positions in %d attempt(s)", reproduced.Len(), totalTickets, attempts))
+		disclosed = reproduced
+	default:
+		res.add("allocation-reproduced-from-seed", reproduced.Equal(disclosed) && attempts == wantAttempts,
 			fmt.Sprintf("%d prizes re-derived over %d positions in %d attempt(s)", len(allocation), totalTickets, attempts))
 	}
 
-	// 6. Every rule holds on the disclosed allocation.
-	if err := CheckRules(totalTickets, allocation, rules); err != nil {
+	// 6. Every rule holds on the disclosed (or, from counts, reproduced) allocation.
+	if err := disclosed.CheckRules(rules); err != nil {
 		res.add("rules-satisfied", false, err.Error())
 	} else {
 		res.add("rules-satisfied", true, fmt.Sprintf("%d rule(s) hold for every placed prize", len(rules.Rules)))
@@ -128,7 +160,46 @@ func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
 			fmt.Sprintf("%d published ticket numbers match the seeded permutation", len(b.TicketNumbers)))
 	}
 
+	// 8. The platform's pre-sales read-back of the minted rows, when published.
+	verifyMintRecord(&res, b)
+
 	return res
+}
+
+// verifyMintRecord checks a bundle's mint verification record, when it has
+// one, against the commit: the rows that were read back before sales carried
+// the committed allocation and display digests over the committed number of
+// tickets, and the walk succeeded. A bundle without a record is not failed;
+// the record is evidence of when the rows were first checked, not of the
+// outcome, which the reproduction above establishes on its own.
+func verifyMintRecord(res *VerifyResult, b Bundle) {
+	v := b.Verify
+	if v == nil {
+		return
+	}
+	switch {
+	case v.Outcome != VerifyOutcomeVerified:
+		res.add("mint-verified-before-sales", false,
+			fmt.Sprintf("mint verification outcome %q: %s", v.Outcome, v.Error))
+	case v.Kind != b.Commit.Kind || v.RoundID != b.Commit.RoundID:
+		res.add("mint-verified-before-sales", false,
+			fmt.Sprintf("verification record is for %s round %d, bundle is %s round %d", v.Kind, v.RoundID, b.Commit.Kind, b.Commit.RoundID))
+	case v.InputDigest != b.Commit.InputDigest:
+		res.add("mint-verified-before-sales", false,
+			fmt.Sprintf("rows read back carried allocation %s, committed %s", short(v.InputDigest), short(b.Commit.InputDigest)))
+	case b.Commit.DisplayDigest != "" && v.DisplayDigest != b.Commit.DisplayDigest:
+		res.add("mint-verified-before-sales", false,
+			fmt.Sprintf("rows read back carried ticket numbers %s, committed %s", short(v.DisplayDigest), short(b.Commit.DisplayDigest)))
+	case b.Commit.TotalTickets != 0 && (v.TotalTickets != b.Commit.TotalTickets || v.PositionsWalked != b.Commit.TotalTickets):
+		res.add("mint-verified-before-sales", false,
+			fmt.Sprintf("verification walked %d of %d rows, %d committed", v.PositionsWalked, v.TotalTickets, b.Commit.TotalTickets))
+	case b.Commit.RulesDigest != "" && v.RulesDigest != "" && v.RulesDigest != b.Commit.RulesDigest:
+		res.add("mint-verified-before-sales", false,
+			fmt.Sprintf("verification saw rules %s, committed %s", short(v.RulesDigest), short(b.Commit.RulesDigest)))
+	default:
+		res.add("mint-verified-before-sales", true,
+			fmt.Sprintf("%d rows read back by %s at %s matched the commitment", v.PositionsWalked, v.Verifier, v.FinishedAt))
+	}
 }
 
 // verifyRulesDigest parses the bundle's rules, checks them against the commit,
