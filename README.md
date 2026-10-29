@@ -1,8 +1,8 @@
 # Draw Verification — published algorithm & in-browser verifier
 
 This repository is the **published, independently-runnable verifier** for
-Raffle Town's prize draws (Main Prize Draw, Instant Rewards allocation, and
-Vault Draws). It contains the complete selection algorithm and verification
+Raffle Town's prize draws (Main Prize Draw, Instant Prizes, and Vault
+Draws). It contains the complete selection algorithm and verification
 logic — the same `drawproof` package the platform itself runs — so that anyone
 can reproduce a draw's outcome from the published proof bundle **without
 trusting the platform**.
@@ -52,7 +52,7 @@ produces a byte-identical binary.
 1. **Commit, before the draw.** The platform writes a tamper-evident
    commitment to its immutable ledger: the SHA-256 hash of a secret local
    seed, a digest of the frozen input set (the eligible pool, or the complete
-   instant-prize allocation), and the number of a drand beacon pulse. For Main
+   instant-prize placement), and the number of a drand beacon pulse. For Main
    and Vault draws in future-pulse mode, that pulse has not yet been published
    — its value is unknowable at commit time.
 2. **Reveal, after the draw.** The platform discloses the local seed, the
@@ -63,10 +63,10 @@ produces a byte-identical binary.
    `(input set, final seed)` — so the verifier reproduces it exactly, and the
    commit binds the inputs so none of them can have been swapped afterwards.
 
-Instant Rewards cannot wait for an unpublished pulse (the allocation must
+Instant Prizes cannot wait for an unpublished pulse (the placement must
 exist before the first ticket is sold), so they mix the **latest published**
 pulse; their binding guarantee is the pre-sales commitment, and the beacon
-value bounds the earliest moment the allocation could have been created.
+value bounds the earliest moment the placement could have been created.
 
 ## Algorithm specification
 
@@ -91,13 +91,16 @@ canonical order. Then a partial Fisher–Yates: for `i = 0 … count−1`, draw
 winner. Winners are an unbiased sample without replacement, in selection
 order.
 
-**Instant allocation** (`AllocateInstantPrizes(totalTickets, units, seed)`).
-Ticket numbers are `1 … totalTickets` in natural order; `units` is the ordered
-list of prize-unit reference strings. The same partial Fisher–Yates over the
-ticket numbers assigns `numbers[i] → units[i]`. When verifying, the unit list
-is reconstructed from the disclosed allocation's own values in canonical
-(bytewise sorted) order — the same order the platform uses — so no extra
-configuration needs to be published.
+**Instant placement** (`AllocateInstantPrizesV2(totalTickets, units, rules,
+seed)`). Sale positions are `1 … totalTickets` (1 = the first ticket sold);
+`units` is the multiset of prize-unit reference strings. Groups of identical
+units are placed by the same partial Fisher–Yates over the free positions, so
+every prize lands uniformly and without replacement. Where a round fixes in
+advance which part of the sale some prizes fall in, that constraint is part of
+the committed inputs (`rules`, digested into the commit) and prizes are placed
+uniformly within it. The unit list is reconstructed from the published counts
+in canonical (bytewise sorted) order — the same order the platform uses — so
+no extra configuration needs to be published. See *Instant Prizes* below.
 
 **Seed mix.** `finalSeed = SHA-256(localSeed ‖ beaconValue)` with both inputs
 as raw bytes (hex-decoded from the bundle). A draw recorded without a beacon
@@ -111,39 +114,34 @@ concatenation ambiguity. The pool digest sorts items first
 iterates ticket numbers in ascending numeric order, framing
 `decimal(ticketNumber)` then the prize reference.
 
-## Instant Wins v2: constrained prize pattern over sale positions
+## Instant Prizes: sealed before the first sale, unchanged after
 
-From algorithm version 2 (`commit.algorithmVersion == 2`) instant prizes are
-placed on **sale positions** (1 = first ticket sold) rather than ticket
-numbers, under a per-round rule set drawn from a fixed vocabulary, and tickets
-are issued in position order at purchase. There is no randomness at purchase.
+What matters for an instant prize is that nothing about it can change once
+tickets are on sale. Before the first ticket is sold, the platform:
 
-- **Rules** (`InstantRules`, canonicalised by `CanonicalRules`): `WINDOW` and
-  `EXCLUDE` restrict where matching prizes may land and are placed directly;
-  `QUOTA` fixes how many matching prizes land in each of N equal brackets of
-  the sale (also placed directly, one Fisher–Yates per bracket;
-  `QuotaFromPlacement` derives such a quota from any placement); `MIN_GAP` and
-  `DENSITY` are enforced by bounded rejection from the same DRBG stream, with
-  the attempt count recorded in the reveal. Rule *types* are fixed here; rule
-  *values* are per round and their digest is in the commit record.
-- **Placement** (`AllocateInstantPrizesV2`): groups of identical prize units are
-  placed most-constrained first by partial Fisher–Yates over the free positions
-  in their allowed set, so each group is uniform within its window and without
-  replacement. `CheckFeasibility` is seed-free and runs before any randomness.
-- **Display numbers** (`DisplayPermutation`): the ticket number a player sees is
-  a full Fisher–Yates over `[1, M]` from a domain-separated sub-seed
-  (`SHA-256("drawproof/display/v2" || seed)`), digested into the commit.
-- **Preview** (`PreviewInstantPrizes`): the same placement on a discarded
-  `crypto/rand` seed, to visualise what a rule set produces without deciding
-  anything.
-- **Raw stream** (`NewStream`): unscaled 64-bit DRBG words for lab testing.
+1. places every instant prize on a **sale position** (1 = the first ticket
+   sold) with the seeded shuffle above;
+2. derives the **ticket number** each position will show from a
+   domain-separated sub-seed (`DisplayPermutation`: a full Fisher–Yates over
+   `[1, M]` seeded with `SHA-256("drawproof/display/v2" ‖ seed)`);
+3. writes the commitment to its ledger: the digest of the complete placement,
+   the digest of the ticket numbering, the ticket population, the hash of the
+   sealed seed and the beacon pulse mixed into it;
+4. reads every minted ticket back against that commitment and records the
+   result on the ledger as well (`VerifyRecord`), so the platform's own check
+   that the database held the committed pattern *before* sales is itself
+   verifiable.
 
-The v2 verifier (`VerifyInstantV2FromSeed`) checks, in order: rules digest,
-allocation digest, local-seed hash, beacon mix, reproduction of the allocation
-in exactly the recorded number of attempts, every rule holding on the disclosed
-allocation, and the display permutation digest (plus the published ticket
-numbers when included). Bundles without a disclosed seed get the reduced
-`VerifyInstantV2Sealed` checks. v1 bundles keep the v1 path.
+Tickets are then issued strictly in position order. There is no randomness at
+purchase: a ticket's prize was decided, sealed and checked before anyone could
+buy it. At close of sales the seed is disclosed and the verifier reproduces
+the whole placement and numbering from it; while the round is on sale the seed
+stays sealed and only the commitment can be checked (`VerifyInstantV2Sealed`).
+
+The verifier (`VerifyInstantV2FromSeed`) checks, in order: the committed input
+digests, the local-seed hash, the beacon mix, the reproduction of the placement
+from the seed, that the placement honours any constraint committed with it,
+and the ticket numbering (plus the published ticket numbers when included).
 
 ## What the verifier checks
 
@@ -156,8 +154,13 @@ numbers when included). Bundles without a disclosed seed get the reduced
 | `pool-digest-matches-commit` | main, vault | The entrant pool was frozen before the draw and unaltered. |
 | `winners-reproduced` | main, vault | Re-running the algorithm reproduces the exact published winners. |
 | `winner-digest-consistent` | main, vault | The winners list was not edited after recording. |
-| `allocation-digest-matches-commit` | instant | The full allocation was sealed before sales opened. On a bundle that publishes `units` (prize reference → count) instead of `allocation`, the allocation is reproduced from the seed first and its digest compared. |
-| `allocation-reproduced-from-seed` | instant | The entire ticket→prize allocation re-derives from the disclosed seed. |
+| `allocation-digest-matches-commit` | instant | The full placement was sealed before sales opened. On a bundle that publishes `units` (prize reference → count) instead of `allocation`, the placement is reproduced from the seed first and its digest compared. |
+| `allocation-reproduced-from-seed` | instant | The entire position→prize placement re-derives from the disclosed seed. |
+| `display-permutation-matches-commit` | instant | The ticket numbers players saw re-derive from the same seed and match the committed digest. |
+| `population-committed` | instant | The number of tickets was fixed in the commitment before sales. |
+| `rules-digest-matches-commit`, `rules-satisfied` | instant | Any constraint on where prizes fall was committed in advance, is published, and the placement honours it. |
+| `mint-verified-before-sales` | instant | The minted tickets were read back against the commitment before sales opened, and that read-back is on the ledger. |
+| `seed-sealed` | instant (on sale) | The seed is still sealed; only the commitment can be checked until close. |
 
 For full independence, the web page additionally fetches the named pulse from
 the public drand relay (`https://api.drand.sh/public/<pulse>`) and recomputes
