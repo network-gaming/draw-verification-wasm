@@ -46,10 +46,9 @@ const (
 	// SegmentFraction of the sale. Enforced by bounded rejection.
 	RuleDensity RuleType = "DENSITY"
 	// RuleQuota: exactly Counts[k] matching units land in segment k of
-	// Segments equal segments of the sale. Placed directly, no discards. This
-	// is how an operator-chosen "shape" of the sale is expressed: the quota
-	// fixes how many prizes fall in each bracket, the RNG alone decides where
-	// inside the bracket.
+	// Segments equal segments of the sale. Placed directly, no discards: the
+	// quota fixes how many prizes fall in each bracket, the RNG alone decides
+	// where inside the bracket.
 	RuleQuota RuleType = "QUOTA"
 )
 
@@ -351,9 +350,9 @@ func QuotaSegmentOf(totalTickets, segments, position int) int {
 
 // QuotaFromPlacement derives QUOTA rules from a candidate placement: one rule
 // per unit reference with the number of units that landed in each of
-// `segments` brackets. This is the operator-facing "use this shape" step: the
-// candidate itself is discarded, only its bracket distribution is kept, and a
-// fresh seed places prizes inside the brackets at mint.
+// `segments` brackets. The placement itself is discarded, only its bracket
+// distribution is kept, and a fresh seed places prizes inside the brackets at
+// mint.
 func QuotaFromPlacement(totalTickets int, placement map[int]string, segments int) []PositionRule {
 	perRef := map[string][]int{}
 	for p, ref := range placement {
@@ -718,7 +717,7 @@ func AllocatePlacement(totalTickets int, units UnitCounts, rules InstantRules, s
 }
 
 // PreviewInstantPrizes runs AllocateInstantPrizesV2 with a fresh, discarded
-// crypto/rand seed so an operator can see what a rule set produces without any
+// crypto/rand seed so a caller can see what a rule set produces without any
 // outcome being decided. The seed is never returned.
 func PreviewInstantPrizes(totalTickets int, units []string, rules InstantRules) (map[int]string, PreviewStats, error) {
 	p, stats, err := PreviewPlacement(totalTickets, CountUnits(units), rules)
