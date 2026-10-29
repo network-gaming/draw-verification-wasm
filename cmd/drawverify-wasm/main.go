@@ -24,6 +24,13 @@
 // the fed pool when the bundle carries no inline pool. drawverifyPoolReset
 // clears it. The pool is held as int32 values, 40 MB for ten million entries.
 //
+// An instant-prize placement published as a file (bundle.allocationFile, one
+// "<position> <reference>" line per prize) is fed the same way through
+// drawverifyAllocationFeed; drawverify builds the placement from it when the
+// bundle carries neither an inline allocation nor unit counts.
+// drawverifyAllocationReset clears it, drawverifyAllocationInfo reports
+// {count} of what was fed.
+//
 // Note: drawverify reproduces the draw from the bundle's own values (seed, beacon
 // value, pool). To make the beacon check fully independent, the page can also
 // fetch the named pulse from a public drand relay
@@ -38,7 +45,10 @@ import (
 	"github.com/network-gaming/draw-verification-wasm/drawproof"
 )
 
-var pool = &drawproof.NumericPool{}
+var (
+	pool  = &drawproof.NumericPool{}
+	alloc = &drawproof.AllocationFeed{}
+)
 
 // verify is exposed to JS as the global function `drawverify(bundleJSON)`.
 func verify(this js.Value, args []js.Value) any {
@@ -51,12 +61,26 @@ func verify(this js.Value, args []js.Value) any {
 	}
 	var res drawproof.VerifyResult
 	var err error
-	if (b.Kind == drawproof.KindMainDraw || b.Kind == drawproof.KindVault) && len(b.Pool) == 0 && pool.Len() > 0 {
+	switch {
+	case (b.Kind == drawproof.KindMainDraw || b.Kind == drawproof.KindVault) && len(b.Pool) == 0 && pool.Len() > 0:
 		if b.PoolCount > 0 && b.PoolCount != pool.Len() {
 			return errResult("pool file holds " + itoa(pool.Len()) + " entries but the bundle declares " + itoa(b.PoolCount))
 		}
 		res = pool.Verify(b.Commit, b.Reveal)
-	} else {
+	case b.Kind == drawproof.KindInstant && len(b.Allocation) == 0 && len(b.Units) == 0 && alloc.Len() > 0:
+		if b.AllocationCount > 0 && b.AllocationCount != alloc.Len() {
+			return errResult("placement file holds " + itoa(alloc.Len()) + " prizes but the bundle declares " + itoa(b.AllocationCount))
+		}
+		total := b.Commit.TotalTickets
+		if total == 0 {
+			total = b.Reveal.TotalTickets
+		}
+		placement, perr := alloc.Placement(total)
+		if perr != nil {
+			return errResult("placement file: " + perr.Error())
+		}
+		res = drawproof.VerifyInstantV2Placement(b, placement)
+	default:
 		res, err = drawproof.VerifyBundle(b)
 		if err != nil {
 			return errResult(err.Error())
@@ -92,6 +116,30 @@ func poolInfo(this js.Value, args []js.Value) any {
 	return string(out)
 }
 
+// allocationFeed is `drawverifyAllocationFeed(text)`: appends the placement
+// lines in text.
+func allocationFeed(this js.Value, args []js.Value) any {
+	if len(args) < 1 {
+		return "missing argument: text"
+	}
+	if err := alloc.Feed(args[0].String()); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// allocationReset is `drawverifyAllocationReset()`.
+func allocationReset(this js.Value, args []js.Value) any {
+	alloc = &drawproof.AllocationFeed{}
+	return nil
+}
+
+// allocationInfo is `drawverifyAllocationInfo()`: {count} of the fed placement.
+func allocationInfo(this js.Value, args []js.Value) any {
+	out, _ := json.Marshal(map[string]any{"count": alloc.Len()})
+	return string(out)
+}
+
 func itoa(n int) string {
 	b, _ := json.Marshal(n)
 	return string(b)
@@ -107,5 +155,8 @@ func main() {
 	js.Global().Set("drawverifyPoolFeed", js.FuncOf(poolFeed))
 	js.Global().Set("drawverifyPoolReset", js.FuncOf(poolReset))
 	js.Global().Set("drawverifyPoolInfo", js.FuncOf(poolInfo))
+	js.Global().Set("drawverifyAllocationFeed", js.FuncOf(allocationFeed))
+	js.Global().Set("drawverifyAllocationReset", js.FuncOf(allocationReset))
+	js.Global().Set("drawverifyAllocationInfo", js.FuncOf(allocationInfo))
 	select {} // keep the Go runtime alive so the exported functions stay callable
 }

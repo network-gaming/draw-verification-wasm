@@ -34,29 +34,70 @@ func VerifyInstantV2Sealed(b Bundle) VerifyResult {
 //  6. every placed unit satisfies every rule that matches it
 //  7. the display permutation reproduced from the seed matches the committed
 //     digest (and the published ticket numbers, when included)
+//
+// On a PUBLIC bundle, which withholds the rules (Bundle.Rules empty, the
+// commit's RulesDigest set), steps 1, 5 and 6 cannot run: step 1 records
+// `rules-withheld` instead, and the verdict rests on steps 2, 3, 4 and 7. That
+// proves the published placement is the one sealed before the first sale and
+// that the ticket numbering derives from the disclosed seed; whether the
+// placement honours the rules is established on the audit bundle.
 func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
+	allocation := parseIntKeyMap(b.Allocation)
+	if len(allocation) == 0 {
+		return verifyInstantV2(b, nil)
+	}
+	disclosed, err := PlacementFromMap(totalTicketsOf(b), allocation)
+	if err != nil {
+		res := VerifyResult{OK: true}
+		res.add("algorithm-version", b.Commit.AlgorithmVersion == AlgorithmVersionV2,
+			fmt.Sprintf("commit declares algorithm version %d", b.Commit.AlgorithmVersion))
+		res.add("allocation-digest-matches-commit", false, err.Error())
+		return res
+	}
+	return verifyInstantV2(b, disclosed)
+}
+
+// VerifyInstantV2Placement is VerifyInstantV2FromSeed over a placement loaded
+// from the bundle's AllocationFile (through an AllocationFeed) rather than
+// its inline Allocation. A nil placement falls back to the inline forms.
+func VerifyInstantV2Placement(b Bundle, disclosed *Placement) VerifyResult {
+	if disclosed == nil {
+		return VerifyInstantV2FromSeed(b)
+	}
+	return verifyInstantV2(b, disclosed)
+}
+
+func totalTicketsOf(b Bundle) int {
+	if b.Commit.TotalTickets != 0 {
+		return b.Commit.TotalTickets
+	}
+	return b.Reveal.TotalTickets
+}
+
+// verifyInstantV2 runs the v2 checks with the disclosed placement, or nil
+// when the bundle publishes unit counts instead (see Bundle.Units); then the
+// allocation is the reproduction itself and its digest is checked once it
+// exists, in step 5.
+func verifyInstantV2(b Bundle, disclosed *Placement) VerifyResult {
 	res := VerifyResult{OK: true}
 	commit, reveal := b.Commit, b.Reveal
-	allocation := parseIntKeyMap(b.Allocation)
-	// A bundle may publish the allocation as unit counts instead of positions
-	// (see Bundle.Units); then the allocation is the reproduction itself and
-	// its digest is checked once it exists, in step 5.
-	fromCounts := len(allocation) == 0 && len(b.Units) > 0
-	totalTickets := commit.TotalTickets
-	if totalTickets == 0 {
-		totalTickets = reveal.TotalTickets
-	}
+	fromCounts := disclosed == nil
+	totalTickets := totalTicketsOf(b)
 
 	res.add("algorithm-version", commit.AlgorithmVersion == AlgorithmVersionV2,
 		fmt.Sprintf("commit declares algorithm version %d", commit.AlgorithmVersion))
 
-	// 1. Rules bound to the commit.
-	rules, rulesOK := verifyRulesDigest(&res, b)
+	// 1. Rules bound to the commit, or withheld.
+	rules, rulesOK, withheld := verifyRulesDigest(&res, b)
 
 	// 2. Allocation bound to the commit.
 	if !fromCounts {
-		res.add("allocation-digest-matches-commit", DigestAllocation(allocation) == commit.InputDigest,
-			fmt.Sprintf("committed %s before sales at %s", short(commit.InputDigest), commit.CommittedAt))
+		res.add("allocation-digest-matches-commit", disclosed.Digest() == commit.InputDigest,
+			fmt.Sprintf("%d prizes over %d positions; committed %s before sales at %s",
+				disclosed.Len(), totalTickets, short(commit.InputDigest), commit.CommittedAt))
+	} else if withheld {
+		res.add("allocation-digest-matches-commit", false,
+			"placement not published: a bundle that withholds the rules must publish the placement itself")
 	}
 
 	// 3. Local seed bound to the commit.
@@ -90,25 +131,24 @@ func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
 		res.add("seed-decodes", false, err.Error())
 		return res
 	}
+	if withheld {
+		// 5 and 6 need the rules. The placement's binding to the commitment
+		// (step 2) and the numbering (step 7) stand on their own.
+		verifyDisplayPermutation(&res, b, totalTickets, finalSeed)
+		verifyMintRecord(&res, b)
+		return res
+	}
 	if !rulesOK {
 		res.add("allocation-reproduced-from-seed", false, "cannot reproduce without valid rules")
 		return res
 	}
 
-	// 5. Reproduce the placement, in the compact form: the disclosed map is
-	// one entry per prize, the Placement one small integer per position.
-	var (
-		disclosed *Placement
-		counts    UnitCounts
-	)
+	// 5. Reproduce the placement, in the compact form: one small integer per
+	// position.
+	var counts UnitCounts
 	if fromCounts {
 		counts = UnitCounts(b.Units)
 	} else {
-		disclosed, err = PlacementFromMap(totalTickets, allocation)
-		if err != nil {
-			res.add("allocation-reproduced-from-seed", false, err.Error())
-			return res
-		}
 		counts = disclosed.Counts()
 	}
 	wantAttempts := reveal.Attempts
@@ -135,7 +175,7 @@ func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
 		disclosed = reproduced
 	default:
 		res.add("allocation-reproduced-from-seed", reproduced.Equal(disclosed) && attempts == wantAttempts,
-			fmt.Sprintf("%d prizes re-derived over %d positions in %d attempt(s)", len(allocation), totalTickets, attempts))
+			fmt.Sprintf("%d prizes re-derived over %d positions in %d attempt(s)", disclosed.Len(), totalTickets, attempts))
 	}
 
 	// 6. Every rule holds on the disclosed (or, from counts, reproduced) allocation.
@@ -146,9 +186,21 @@ func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
 	}
 
 	// 7. Display permutation.
+	verifyDisplayPermutation(&res, b, totalTickets, finalSeed)
+
+	// 8. The platform's pre-sales read-back of the minted rows, when published.
+	verifyMintRecord(&res, b)
+
+	return res
+}
+
+// verifyDisplayPermutation reproduces the ticket numbering from the seed and
+// checks it against the committed digest and, when published, the bundle's
+// ticket numbers.
+func verifyDisplayPermutation(res *VerifyResult, b Bundle, totalTickets int, finalSeed []byte) {
 	perm := DisplayPermutation(totalTickets, finalSeed)
-	res.add("display-permutation-matches-commit", DigestPermutation(perm) == commit.DisplayDigest,
-		fmt.Sprintf("committed %s", short(commit.DisplayDigest)))
+	res.add("display-permutation-matches-commit", DigestPermutation(perm) == b.Commit.DisplayDigest,
+		fmt.Sprintf("committed %s", short(b.Commit.DisplayDigest)))
 	if len(b.TicketNumbers) > 0 {
 		same := len(b.TicketNumbers) == len(perm)
 		for i := 0; same && i < len(perm); i++ {
@@ -159,11 +211,6 @@ func VerifyInstantV2FromSeed(b Bundle) VerifyResult {
 		res.add("ticket-numbers-match-permutation", same,
 			fmt.Sprintf("%d published ticket numbers match the seeded permutation", len(b.TicketNumbers)))
 	}
-
-	// 8. The platform's pre-sales read-back of the minted rows, when published.
-	verifyMintRecord(&res, b)
-
-	return res
 }
 
 // verifyMintRecord checks a bundle's mint verification record, when it has
@@ -203,20 +250,29 @@ func verifyMintRecord(res *VerifyResult, b Bundle) {
 }
 
 // verifyRulesDigest parses the bundle's rules, checks them against the commit,
-// and records the result. Returns the parsed rules and whether they are usable.
-func verifyRulesDigest(res *VerifyResult, b Bundle) (InstantRules, bool) {
+// and records the result. Returns the parsed rules, whether they are usable,
+// and whether the bundle withholds them: no rules published while the commit
+// names a rules digest (a public bundle). A withheld rule set is recorded as
+// `rules-withheld`, which passes: it is a statement about the bundle, not a
+// finding, and the digest it names is checked on the audit bundle.
+func verifyRulesDigest(res *VerifyResult, b Bundle) (rules InstantRules, ok, withheld bool) {
+	if b.Rules == "" && b.Commit.RulesDigest != "" {
+		res.add("rules-withheld", true,
+			fmt.Sprintf("placement rules not published in this bundle; committed as %s and checked on the audit bundle", short(b.Commit.RulesDigest)))
+		return InstantRules{}, false, true
+	}
 	rules, err := ParseRules(b.Rules)
 	if err != nil {
 		res.add("rules-digest-matches-commit", false, "rules could not be parsed: "+err.Error())
-		return rules, false
+		return rules, false, false
 	}
 	_, digest, err := CanonicalRules(rules)
 	if err != nil {
 		res.add("rules-digest-matches-commit", false, err.Error())
-		return rules, false
+		return rules, false, false
 	}
-	ok := digest == b.Commit.RulesDigest
+	ok = digest == b.Commit.RulesDigest
 	res.add("rules-digest-matches-commit", ok,
 		fmt.Sprintf("%d rule(s), committed %s", len(rules.Rules), short(b.Commit.RulesDigest)))
-	return rules, ok
+	return rules, ok, false
 }
