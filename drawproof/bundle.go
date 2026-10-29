@@ -30,9 +30,19 @@ type Bundle struct {
 	// verify; when present it is checked against the commit.
 	Verify *VerifyRecord `json:"verify,omitempty"`
 
-	// Instant Wins v2 only.
-	Rules         string `json:"rules,omitempty"`         // canonical rules JSON (digested in Commit.RulesDigest)
-	TicketNumbers []int  `json:"ticketNumbers,omitempty"` // display ticket number per sale position (index 0 = position 1); optional convenience
+	// Instant Wins v2 only. Rules is the canonical rules JSON, digested in
+	// Commit.RulesDigest. A bundle without Rules but with a RulesDigest in
+	// its commit is a PUBLIC bundle: the rules are withheld, the placement is
+	// published (Allocation or AllocationFile), and the verifier checks the
+	// placement against the commitment without replaying it (see
+	// VerifyInstantV2Placement). AllocationFile is the placement as a file,
+	// one prize per line "<salePosition> <reference>" (AllocationLine), with
+	// AllocationCount prizes in it; it is loaded through an AllocationFeed
+	// and plays the part Allocation plays inline.
+	Rules           string `json:"rules,omitempty"`
+	TicketNumbers   []int  `json:"ticketNumbers,omitempty"` // display ticket number per sale position (index 0 = position 1); optional convenience
+	AllocationFile  string `json:"allocationFile,omitempty"`
+	AllocationCount int    `json:"allocationCount,omitempty"`
 
 	// Large pools are published as a separate file instead of inline in Pool:
 	// one entry per line. PoolDigest and PoolCount describe it so a verifier
@@ -49,6 +59,11 @@ type Bundle struct {
 // whose pool was published as a file and has not been loaded into the bundle.
 var ErrPoolNotLoaded = errors.New("bundle pool is published as a file (poolFile) and is not loaded")
 
+// ErrAllocationNotLoaded is returned by VerifyBundle for an instant bundle
+// whose placement was published as a file and has not been loaded; load it
+// with an AllocationFeed and call VerifyInstantV2Placement.
+var ErrAllocationNotLoaded = errors.New("bundle placement is published as a file (allocationFile) and is not loaded")
+
 // VerifyBundle dispatches a bundle to the correct verification path and returns
 // the per-check result. Instant bundles with a disclosed seed are verified by
 // full reproduction-from-seed; without a seed they fall back to a digest match.
@@ -62,10 +77,13 @@ func VerifyBundle(b Bundle) (VerifyResult, error) {
 	case KindInstant:
 		alloc := parseIntKeyMap(b.Allocation)
 		if b.Commit.AlgorithmVersion == AlgorithmVersionV2 {
-			if b.Reveal.Seed != "" {
-				return VerifyInstantV2FromSeed(b), nil
+			if b.Reveal.Seed == "" {
+				return VerifyInstantV2Sealed(b), nil
 			}
-			return VerifyInstantV2Sealed(b), nil
+			if len(alloc) == 0 && len(b.Units) == 0 && b.AllocationFile != "" {
+				return VerifyResult{}, ErrAllocationNotLoaded
+			}
+			return VerifyInstantV2FromSeed(b), nil
 		}
 		if b.Reveal.Seed != "" {
 			return VerifyInstantFromSeed(b.Reveal.TotalTickets, alloc, b.Commit, b.Reveal), nil

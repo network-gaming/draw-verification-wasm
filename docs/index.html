@@ -82,6 +82,8 @@
     <textarea id="bundleText" placeholder='{"kind":"MAIN_DRAW","poolFile":"...","commit":{...},"reveal":{...}}'></textarea>
     <label style="margin-top:12px;">Pool file (optional: the entries of a large main draw, one per line, as published next to the bundle)</label>
     <div style="margin:6px 0 10px;"><input type="file" id="poolFile" accept=".txt,.gz,text/plain,application/gzip" /></div>
+    <label style="margin-top:12px;">Placement file (optional: the instant-prize placement of a large round, one "position reference" line per prize, as published next to the bundle)</label>
+    <div style="margin:6px 0 10px;"><input type="file" id="allocationFile" accept=".txt,.gz,text/plain,application/gzip" /></div>
     <div style="margin-top:10px;"><button id="verifyPaste">Verify bundle</button></div>
     <p class="status" id="statusPaste">Use the platform's public proof feed
       (<code>GET &lt;platform&gt;/v2/raffles/rounds/&lt;id&gt;/verification</code> or
@@ -115,12 +117,19 @@ function poolUrlFor(b) {
   if (!b.poolFile) return "";
   try { return new URL(b.poolFile, bundleOrigin || location.href).toString(); } catch { return b.poolFile; }
 }
+// Likewise an instant bundle's placement file (bundle.allocationFile).
+function allocationUrlFor(b) {
+  if (!b.allocationFile) return "";
+  try { return new URL(b.allocationFile, bundleOrigin || location.href).toString(); } catch { return b.allocationFile; }
+}
 function verifyInWorker(bundle, onProgress) {
   const id = nextId++;
   const poolFile = document.getElementById("poolFile").files[0] || null;
+  const allocationFile = document.getElementById("allocationFile").files[0] || null;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject, onProgress });
-    worker.postMessage({ type: "verify", id, bundle, poolUrl: poolFile ? "" : poolUrlFor(bundle), poolFile });
+    worker.postMessage({ type: "verify", id, bundle, poolUrl: poolFile ? "" : poolUrlFor(bundle), poolFile,
+      allocationUrl: allocationFile ? "" : allocationUrlFor(bundle), allocationFile });
   });
 }
 
@@ -148,6 +157,8 @@ const WHY = {
   "algorithm-version": "The commitment names the published algorithm version the verifier re-runs: prizes were placed on sale positions before sales and tickets were issued in position order, with no randomness at purchase.",
   "rules-digest-matches-commit": "Re-digesting the published placement constraints matches the digest committed before the seed existed — they could not have changed after the fact.",
   "rules-satisfied": "Every placed prize obeys every rule that applies to it (position windows, exclusions, gaps, density).",
+  "rules-withheld": "This public bundle publishes the sealed placement but not the rules that shaped it, so the placement is checked against the commitment rather than re-run from the seed. The committed rules digest is checked on the audit bundle.",
+  "mint-verified-before-sales": "Before sales opened the platform read every minted ticket back against the commitment and recorded that read-back on the ledger; the record matches the commitment.",
   "display-permutation-matches-commit": "The ticket numbers shown to players are a seeded shuffle of the sale positions, reproduced from the same seed and matching the committed digest.",
   "ticket-numbers-match-permutation": "The published position→ticket-number list equals the reproduced shuffle.",
   "population-committed": "The total number of tickets was fixed in the commitment before sales.",
@@ -217,11 +228,11 @@ async function checkWork(name, b) {
 
 // ---- main bundle renderer ----
 async function renderBundle(b, idx) {
-  let res, poolInfo = null;
+  let res, poolInfo = null, allocationInfo = null;
   const status = document.getElementById("statusPaste");
   try {
-    const m = await verifyInWorker(b, (loaded) => { status.textContent = `Reading pool file… ${(loaded/1048576).toFixed(1)} MB`; });
-    res = m.result; poolInfo = m.poolInfo;
+    const m = await verifyInWorker(b, (loaded) => { status.textContent = `Reading ${b.kind === "INSTANT" ? "placement" : "pool"} file… ${(loaded/1048576).toFixed(1)} MB`; });
+    res = m.result; poolInfo = m.poolInfo; allocationInfo = m.allocationInfo;
   } catch (e) { return errorCard(`Bundle #${idx+1}`, "verifier error: " + e.message); }
 
   const div = document.createElement("div");
@@ -242,7 +253,8 @@ async function renderBundle(b, idx) {
   if (c.algorithmVersion) {
     committed += kvRow("algorithm version", c.algorithmVersion) + kvRow("total tickets", c.totalTickets) + kvRow("rules digest", c.rulesDigest) + kvRow("display digest", c.displayDigest);
     let rulesTxt = "";
-    try { const rr = JSON.parse(b.rules || "{}"); rulesTxt = (rr.rules||[]).map(x => {
+    if (!b.rules && c.rulesDigest) rulesTxt = "withheld from this public bundle (committed digest above; checked on the audit bundle)";
+    else try { const rr = JSON.parse(b.rules || "{}"); rulesTxt = (rr.rules||[]).map(x => {
       const sel = x.unitRef ? x.unitRef : `amount ≥ ${x.minAmount}`;
       if (x.type === "WINDOW" || x.type === "EXCLUDE") return `${x.type} ${sel}: ${Math.round(x.minFraction*100)}%–${Math.round(x.maxFraction*100)}% of sale`;
       if (x.type === "MIN_GAP") return `MIN_GAP ${sel}: ≥ ${x.gap} positions apart`;
@@ -260,6 +272,7 @@ async function renderBundle(b, idx) {
   if (b.pool && b.pool.length) revealed += kvRow(`pool (${poolN} entries)`, (b.pool.slice(0,8).join(", ") + (poolN>8?` … +${poolN-8} more`:"")), "in");
   else if (b.poolFile) revealed += kvRow(`pool file (${b.poolCount||"?"} entries)`, `${b.poolFile}${poolInfo?` — read ${poolInfo.count} entries, digest ${poolInfo.digest.slice(0,12)}…`:""}`, "in");
   if (b.allocation) revealed += kvRow(`allocation (${allocN})${c.algorithmVersion?" by sale position":""}`, Object.entries(b.allocation).slice(0,4).map(([k,v])=>`${k}→${v}`).join("  ") + (allocN>4?` …`:""), "in");
+  else if (b.allocationFile) revealed += kvRow(`placement file (${b.allocationCount||"?"} prizes by sale position)`, `${b.allocationFile}${allocationInfo?` — read ${allocationInfo.count} prizes`:""}`, "in");
   if (r.attempts) revealed += kvRow("placement attempts", r.attempts, "out");
   if (b.ticketNumbers) revealed += kvRow(`ticket numbers (${b.ticketNumbers.length})`, b.ticketNumbers.slice(0,10).join(", ") + (b.ticketNumbers.length>10?" …":""), "out");
   revealed += kvRow("final seed", r.seed, "out");

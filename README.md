@@ -143,6 +143,26 @@ digests, the local-seed hash, the beacon mix, the reproduction of the placement
 from the seed, that the placement honours any constraint committed with it,
 and the ticket numbering (plus the published ticket numbers when included).
 
+### The public bundle: placement published, rules withheld
+
+A platform may publish the sealed placement to players while keeping the
+placement rules for its auditors. Such a **public bundle** carries the commit
+and reveal records and the complete placement, but no `rules`; the commit's
+`rulesDigest` still names them. The verifier recognises this (`rules-withheld`)
+and checks what it can without the rules: that the published placement digests
+to the value committed before the first sale, that the local seed hashes to its
+commitment and mixes with the beacon into the final seed, and that the ticket
+numbering derives from that seed. It does not re-run the placement algorithm,
+so "placed uniformly within the rules" is established on the audit bundle, not
+here. A bundle that withholds the rules must publish the placement itself:
+unit counts alone (`units`) cannot be checked without the rules.
+
+A large placement travels as a file instead of inline JSON, named in
+`allocationFile` with `allocationCount` prizes: one prize per line, the sale
+position, a space, and the prize-unit reference (`AllocationLine`). The WASM
+takes it through `drawverifyAllocationFeed` the way it takes a pool file, and
+the Go API through `AllocationFeed` and `VerifyInstantV2Placement`.
+
 ## What the verifier checks
 
 | Check | Kinds | Proves |
@@ -159,6 +179,7 @@ and the ticket numbering (plus the published ticket numbers when included).
 | `display-permutation-matches-commit` | instant | The ticket numbers players saw re-derive from the same seed and match the committed digest. |
 | `population-committed` | instant | The number of tickets was fixed in the commitment before sales. |
 | `rules-digest-matches-commit`, `rules-satisfied` | instant | Any constraint on where prizes fall was committed in advance, is published, and the placement honours it. |
+| `rules-withheld` | instant (public bundle) | The bundle publishes the placement but not the rules; the placement is checked against the commitment, not re-run. Informational, always passes. |
 | `mint-verified-before-sales` | instant | The minted tickets were read back against the commitment before sales opened, and that read-back is on the ledger. |
 | `seed-sealed` | instant (on sale) | The seed is still sealed; only the commitment can be checked until close. |
 
