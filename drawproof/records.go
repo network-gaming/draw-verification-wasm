@@ -11,6 +11,32 @@ const (
 	KindVault    DrawKind = "VAULT"
 )
 
+// DrawMethod says how a main draw's winners were produced. The zero value and
+// DrawMethodBeacon are the computed draw: winners are a deterministic function
+// of the frozen pool and a seed mixed from the platform's sealed component and
+// a public randomness beacon pulse. DrawMethodManual is a recorded draw: the
+// winners were drawn outside the platform (slips from a box at an event, say),
+// typed in by an operator and approved by a second one. A recorded draw is
+// not reproducible from a seed; the verifier checks only that the pool was
+// frozen before the draw and that every recorded winner was in it.
+type DrawMethod string
+
+const (
+	DrawMethodBeacon DrawMethod = "BEACON"
+	DrawMethodManual DrawMethod = "MANUAL"
+)
+
+// IsManual reports whether the method is the recorded (hand-drawn) draw.
+func (m DrawMethod) IsManual() bool { return m == DrawMethodManual }
+
+// DrawEvidence is what a recorded draw publishes in place of a seed: where the
+// draw can be watched and who witnessed it, as the operator entered them.
+type DrawEvidence struct {
+	RecordingURL string `json:"recordingUrl,omitempty"`
+	Witnesses    string `json:"witnesses,omitempty"`
+	Notes        string `json:"notes,omitempty"`
+}
+
 // CommitRecord is written to the immutable ledger BEFORE a draw is run (for the
 // main/vault draws) or BEFORE instant-win sales open. It binds the platform to a
 // fixed input set and a fixed local seed, and names the beacon pulse whose value
@@ -31,6 +57,12 @@ type CommitRecord struct {
 	BeaconPulse uint64   `json:"beaconPulse,omitempty"` // nominated beacon pulse number
 	AdminID     int      `json:"adminId,omitempty"`
 	CommittedAt string   `json:"committedAt"` // RFC3339
+
+	// Method is how the main draw's winners will be produced; absent or
+	// BEACON means computed from the seed, MANUAL means recorded (see
+	// DrawMethod). A MANUAL commit names no beacon pulse and its SeedHash
+	// is empty: it freezes the pool before the draw and nothing else.
+	Method DrawMethod `json:"method,omitempty"`
 
 	// Instant Wins v2 (AlgorithmVersion == AlgorithmVersionV2). Zero / absent
 	// values mean a v1 record.
@@ -67,6 +99,16 @@ type RevealRecord struct {
 	AdminID         int      `json:"adminId,omitempty"`         // admin who executed the draw (0 = system/automated)
 	ResultedAt      string   `json:"resultedAt"`                // RFC3339
 	Attempts        int      `json:"attempts,omitempty"`        // instant v2: placement attempts consumed (1 unless rejection rules)
+
+	// Recorded (MANUAL) main draws only. Seed, LocalSeed and the beacon
+	// fields are empty: the winners were drawn outside the platform. AdminID
+	// is the approver; EnteredBy lists the operators who typed the winners
+	// in; ExportDigest is the SHA-256 of the entries sheet the operator
+	// printed from the frozen pool; Evidence is where the draw can be seen.
+	Method       DrawMethod    `json:"method,omitempty"`
+	EnteredBy    []int         `json:"enteredBy,omitempty"`
+	ExportDigest string        `json:"exportDigest,omitempty"`
+	Evidence     *DrawEvidence `json:"evidence,omitempty"`
 }
 
 // CommitKey is the immudb key under which a commit is stored.

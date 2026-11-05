@@ -174,6 +174,10 @@ the Go API through `AllocationFeed` and `VerifyInstantV2Placement`.
 | `pool-digest-matches-commit` | main, vault | The entrant pool was frozen before the draw and unaltered. |
 | `winners-reproduced` | main, vault | Re-running the algorithm reproduces the exact published winners. |
 | `winner-digest-consistent` | main, vault | The winners list was not edited after recording. |
+| `recorded-draw` | main (recorded) | Informational, always passes: the winners were drawn by hand and recorded, not computed. |
+| `method-matches-commit` | main (recorded) | The commitment written before the draw already said it would be recorded; a computed draw cannot be re-labelled afterwards. |
+| `winners-in-pool` | main (recorded) | Every recorded winner was an entry of the pool frozen before the draw. |
+| `winners-distinct` | main (recorded) | No entry was recorded as a winner twice. |
 | `allocation-digest-matches-commit` | instant | The full placement was sealed before sales opened. On a bundle that publishes `units` (prize reference → count) instead of `allocation`, the placement is reproduced from the seed first and its digest compared. |
 | `allocation-reproduced-from-seed` | instant | The entire position→prize placement re-derives from the disclosed seed. |
 | `display-permutation-matches-commit` | instant | The ticket numbers players saw re-derive from the same seed and match the committed digest. |
@@ -187,6 +191,17 @@ For full independence, the web page additionally fetches the named pulse from
 the public drand relay (`https://api.drand.sh/public/<pulse>`) and recomputes
 the pulse's scheduled time from the chain's own `genesis_time` and `period` —
 none of which involves the platform.
+
+## Recorded draws
+
+A main draw can be run outside the platform: the operator freezes the entrant
+pool, prints the entries, draws the slips by hand at an event, types the
+winning ticket numbers in and a second operator approves them. Such a draw is
+committed and revealed on the ledger with `method: "MANUAL"` and no seed. The
+verifier then runs only the checks a recorded outcome can answer (the rows
+marked *recorded* above), reports `recorded: true` on the result, and never
+claims the outcome is reproducible. A platform presenting such a draw must say
+it was recorded, not verified.
 
 ## Scope
 

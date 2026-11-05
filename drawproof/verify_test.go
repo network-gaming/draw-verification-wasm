@@ -260,3 +260,75 @@ func TestVerifyInstant_RoundTrip(t *testing.T) {
 		t.Fatal("altered allocation should fail against the pre-sales commit")
 	}
 }
+
+// A recorded (MANUAL) main draw: no seed, winners typed in by an operator.
+// The verifier checks the frozen pool and the winners' membership of it,
+// marks the result Recorded, and never runs the reproduction check.
+func TestVerifyMainDraw_RecordedRoundTrip(t *testing.T) {
+	pool := pool(500)
+	winners := []string{pool[17], pool[3], pool[421]}
+
+	commit := CommitRecord{
+		Kind:        KindMainDraw,
+		RoundID:     9,
+		Method:      DrawMethodManual,
+		InputDigest: DigestStringsSorted(pool),
+		CommittedAt: "2026-11-05T10:00:00Z",
+	}
+	reveal := RevealRecord{
+		Kind:         KindMainDraw,
+		RoundID:      9,
+		Method:       DrawMethodManual,
+		Winners:      winners,
+		WinnerDigest: DigestStringsOrdered(winners),
+		EnteredBy:    []int{12},
+		AdminID:      34,
+		ResultedAt:   "2026-11-05T19:30:00Z",
+	}
+
+	res := VerifyMainDraw(pool, commit, reveal)
+	if !res.OK {
+		for _, c := range res.Checks {
+			if !c.OK {
+				t.Errorf("check failed: %s (%s)", c.Name, c.Detail)
+			}
+		}
+		t.Fatal("expected the recorded draw to pass its checks")
+	}
+	if !res.Recorded {
+		t.Fatal("expected the result to be marked Recorded")
+	}
+	for _, c := range res.Checks {
+		if c.Name == "winners-reproduced" || c.Name == "local-seed-hash-matches-commit" {
+			t.Fatalf("seed-based check %s must not run on a recorded draw", c.Name)
+		}
+	}
+
+	// A winner that was never in the frozen pool fails.
+	bad := reveal
+	bad.Winners = []string{pool[17], "999999"}
+	bad.WinnerDigest = DigestStringsOrdered(bad.Winners)
+	if r := VerifyMainDraw(pool, commit, bad); r.OK {
+		t.Fatal("a winner outside the pool must fail")
+	}
+
+	// The same entry recorded twice fails.
+	dup := reveal
+	dup.Winners = []string{pool[17], pool[17]}
+	dup.WinnerDigest = DigestStringsOrdered(dup.Winners)
+	if r := VerifyMainDraw(pool, commit, dup); r.OK {
+		t.Fatal("a duplicate winner must fail")
+	}
+
+	// A commitment that promised a computed draw cannot be revealed as recorded.
+	computedCommit := commit
+	computedCommit.Method = ""
+	if r := VerifyMainDraw(pool, computedCommit, reveal); r.OK {
+		t.Fatal("a recorded reveal on a computed commitment must fail")
+	}
+
+	// The pool changing after the freeze fails.
+	if r := VerifyMainDraw(append(pool, "123456789"), commit, reveal); r.OK {
+		t.Fatal("a pool that changed after the commit must fail")
+	}
+}

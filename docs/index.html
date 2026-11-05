@@ -158,6 +158,10 @@ const WHY = {
   "rules-digest-matches-commit": "Re-digesting the published placement constraints matches the digest committed before the seed existed — they could not have changed after the fact.",
   "rules-satisfied": "Every placed prize obeys every rule that applies to it (position windows, exclusions, gaps, density).",
   "rules-withheld": "This public bundle publishes the sealed placement but not the rules that shaped it, so the placement is checked against the commitment rather than re-run from the seed. The committed rules digest is checked on the audit bundle.",
+  "recorded-draw": "This draw was made by hand and recorded by the operator. The checks below confirm the entries were frozen before the draw and the winners were among them; nothing here reproduces the outcome.",
+  "method-matches-commit": "The commitment written before the draw already said the draw would be recorded, and the reveal agrees, so a computed draw cannot be re-labelled afterwards (nor the reverse).",
+  "winners-in-pool": "Every recorded winning ticket number is an entry of the pool frozen before the draw.",
+  "winners-distinct": "No entry was recorded as a winner twice: a drawn slip leaves the box.",
   "mint-verified-before-sales": "Before sales opened the platform read every minted ticket back against the commitment and recorded that read-back on the ledger; the record matches the commitment.",
   "display-permutation-matches-commit": "The ticket numbers shown to players are a seeded shuffle of the sale positions, reproduced from the same seed and matching the committed digest.",
   "ticket-numbers-match-permutation": "The published position→ticket-number list equals the reproduced shuffle.",
@@ -240,7 +244,11 @@ async function renderBundle(b, idx) {
   const label = b.id || `${b.kind || "BUNDLE"} #${idx+1}`;
   if (res.error) { div.innerHTML = `<div class="rhead"><span class="label">${esc(label)}</span><span class="verdict bad">ERROR — ${esc(res.error)}</span></div>`; return div; }
 
-  const verdict = res.ok
+  const verdict = res.recorded
+    ? (res.ok
+        ? `<span class="verdict ok">RECORDED — hand-drawn; pool frozen &amp; winners in it (not reproducible)</span>`
+        : `<span class="verdict bad">FAILED — recorded draw does not match its frozen pool</span>`)
+    : res.ok
     ? `<span class="verdict ok">VERIFIED — reproducible &amp; unaltered</span>`
     : `<span class="verdict bad">FAILED — could not be verified</span>`;
 
